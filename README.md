@@ -10,3 +10,5 @@
 ---
 
 > 🚧 重写中。前身为 [coren](https://github.com/FuYue-WanJie/coren)。
+
+架构草案见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。

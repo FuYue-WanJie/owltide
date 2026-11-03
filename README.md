@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/wordmark-dark.png">
-    <img src="assets/wordmark-light.png" alt="OwlTide" width="420">
+    <img src="assets/wordmark-light.png" alt="OwlTide" width="360">
   </picture>
 </p>
 

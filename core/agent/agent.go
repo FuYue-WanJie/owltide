@@ -1,0 +1,217 @@
+// Package agent implements the single-agent loop:
+// understand -> call tools -> read results -> continue or answer.
+package agent
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/FuYue-WanJie/owltide/core/config"
+	"github.com/FuYue-WanJie/owltide/core/decision"
+	"github.com/FuYue-WanJie/owltide/core/model"
+	"github.com/FuYue-WanJie/owltide/core/tool"
+)
+
+// Options wire the agent together.
+type Options struct {
+	Config    config.Config
+	Client    *model.Client
+	Tools     *tool.Registry
+	Decisions *decision.Logger // optional
+	SessionID string
+	WorkDir   string
+	// OnDelta streams assistant text to the UI; optional.
+	OnDelta func(text string)
+}
+
+// Agent runs the loop.
+type Agent struct {
+	opts     Options
+	messages []model.Message
+	tokens   int
+	turn     int
+}
+
+// New creates an Agent with the system prompt in place.
+func New(opts Options) *Agent {
+	sys := opts.Config.System
+	if opts.WorkDir != "" {
+		sys += "\nWorking directory: " + opts.WorkDir
+	}
+	a := &Agent{opts: opts}
+	a.messages = []model.Message{{Role: model.RoleSystem, Content: sys}}
+	return a
+}
+
+// maxTurnsFallback guards against an unset budget.
+func (a *Agent) maxTurns() int {
+	if a.opts.Config.Budget.MaxTurns > 0 {
+		return a.opts.Config.Budget.MaxTurns
+	}
+	return 30
+}
+
+// maxTokensFallback guards against an unset budget.
+func (a *Agent) maxTokens() int {
+	if a.opts.Config.Budget.MaxTokens > 0 {
+		return a.opts.Config.Budget.MaxTokens
+	}
+	return 400_000
+}
+
+// Run executes one user task to completion and returns the final text.
+func (a *Agent) Run(ctx context.Context, userText string) (string, error) {
+	start := time.Now()
+	a.turn++
+
+	a.messages = append(a.messages, model.Message{Role: model.RoleUser, Content: userText})
+
+	var (
+		final    string
+		toolRecs []decision.ToolRecord
+		runErr   error
+		steps    int
+	)
+	for {
+		if ctx.Err() != nil {
+			runErr = ctx.Err()
+			break
+		}
+		steps++
+		if steps > a.maxTurns() {
+			final = a.wrapUp("turn limit reached")
+			break
+		}
+		if a.tokens > a.maxTokens() {
+			final = a.wrapUp("token budget exhausted")
+			break
+		}
+
+		msg, usage, err := a.step(ctx)
+		a.tokens += usage.Total()
+		if err != nil {
+			runErr = err
+			break
+		}
+		a.messages = append(a.messages, msg)
+
+		if len(msg.ToolCalls) == 0 {
+			final = msg.Content
+			break
+		}
+
+		// Execute tools in order, feed results back.
+		for _, tc := range msg.ToolCalls {
+			rec := a.execTool(ctx, tc)
+			toolRecs = append(toolRecs, rec)
+		}
+	}
+
+	a.logTurn(start, userText, toolRecs, len(toolRecs) == 0, runErr)
+	return final, runErr
+}
+
+// step makes one model call.
+func (a *Agent) step(ctx context.Context) (model.Message, model.Usage, error) {
+	req := model.Request{
+		Model:    a.opts.Config.Model.Name,
+		Messages: a.messages,
+	}
+	if defs := a.opts.Tools.Definitions(); len(defs) > 0 {
+		req.Tools = defsToAny(defs)
+	}
+	return a.opts.Client.Stream(ctx, req, func(sr model.StreamResult) {
+		if a.opts.OnDelta != nil {
+			a.opts.OnDelta(sr.Content)
+		}
+	})
+}
+
+// execTool runs one tool call and appends the tool result message.
+func (a *Agent) execTool(ctx context.Context, tc model.ToolCall) decision.ToolRecord {
+	rec := decision.ToolRecord{Name: tc.Function.Name}
+	start := time.Now()
+
+	result, err := "tool not found", fmt.Errorf("tool %q not found", tc.Function.Name)
+	if t, ok := a.opts.Tools.Get(tc.Function.Name); ok {
+		result, err = t.Call(ctx, json.RawMessage(tc.Function.Arguments))
+	}
+	rec.DurationMS = time.Since(start).Milliseconds()
+	if err != nil {
+		rec.Error = err.Error()
+		result = result + "\nERROR: " + err.Error()
+	} else {
+		rec.OK = true
+	}
+	if strings.TrimSpace(result) == "" {
+		result = "(empty output)"
+	}
+
+	a.messages = append(a.messages, model.Message{
+		Role: model.RoleTool, Name: tc.Function.Name,
+		ToolCallID: tc.ID, Content: result,
+	})
+	return rec
+}
+
+// wrapUp asks the model to finish within constraints.
+func (a *Agent) wrapUp(reason string) string {
+	a.messages = append(a.messages, model.Message{
+		Role: model.RoleUser,
+		Content: fmt.Sprintf(
+			"System: %s. Stop working and give a brief final summary of what was done.", reason),
+	})
+	msg, usage, err := a.step(context.Background())
+	a.tokens += usage.Total()
+	if err != nil {
+		return "(failed to produce summary: " + err.Error() + ")"
+	}
+	a.messages = append(a.messages, msg)
+	return msg.Content
+}
+
+// logTurn writes the decision record.
+func (a *Agent) logTurn(start time.Time, input string, tools []decision.ToolRecord, repliedDirectly bool, err error) {
+	if a.opts.Decisions == nil {
+		return
+	}
+	outcome := decision.OutcomeSuccess
+	errMsg := ""
+	if err != nil {
+		outcome = decision.OutcomeError
+		errMsg = err.Error()
+	}
+	rec := decision.Record{
+		SessionID:       a.opts.SessionID,
+		Turn:            a.turn,
+		InputDigest:     digest(input),
+		Model:           a.opts.Config.Model.Name,
+		ToolsCalled:     tools,
+		RepliedDirectly: repliedDirectly,
+		DurationMS:      time.Since(start).Milliseconds(),
+		Outcome:         outcome,
+		Error:           errMsg,
+	}
+	_ = a.opts.Decisions.Log(rec)
+}
+
+// digest keeps the first 200 runes of user input.
+func digest(s string) string {
+	r := []rune(s)
+	if len(r) <= 200 {
+		return s
+	}
+	return string(r[:200]) + "..."
+}
+
+// defsToAny widens definitions for JSON encoding.
+func defsToAny(defs []tool.Definition) []any {
+	out := make([]any, len(defs))
+	for i, d := range defs {
+		out[i] = d
+	}
+	return out
+}

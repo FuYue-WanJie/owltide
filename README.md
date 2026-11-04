@@ -21,9 +21,10 @@
 
 ## 跑在哪里
 
-- **Android 手机**：Go 核心以原生 arm64 程序运行，由 Kotlin 前台服务拉起；只有执行命令时才进入 proot 容器。
-- **吃资源的任务**：交给 InstaBox 远程机器或 GitHub Actions。
-- **可选备机**：Hack Club Nest。
+核心是一个跨平台的 Go 程序，Go 能编译到的地方都能跑：电脑、服务器、Android 手机。
+
+- **Android**：核心以原生 arm64 程序运行，由 Kotlin 前台服务拉起；只有执行命令时才进入 proot 容器。
+- **吃资源的任务**：交给远程环境（如 InstaBox）或 GitHub Actions。
 
 ## 仓库结构（规划）
 

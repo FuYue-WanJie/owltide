@@ -135,7 +135,7 @@ func (t AgentUpsert) Call(ctx context.Context, args json.RawMessage) (string, er
 	if err := yamlUnmarshal(args, &a); err != nil {
 		return reject("bad arguments: %v", err)
 	}
-	if err := a.Validate(t.Env.knownTools()); err != nil {
+	if err := a.Def.Validate(t.Env.knownTools()); err != nil {
 		return reject("invalid definition: %v", err)
 	}
 	if err := t.Env.guardLock(a.LockID()); err != nil {
@@ -195,8 +195,12 @@ type writerTool struct {
 }
 
 func (w writerTool) Schema() tool.Definition {
+	name := w.toolName
+	if name == "" {
+		name = w.what + ".write"
+	}
 	return tool.Definition{Type: "function", Function: tool.FunctionSchema{
-		Name: w.toolName,
+		Name: name,
 		Description: "Write a " + w.what + " markdown file to ~/.owltide/" + w.dir +
 			"/<name>.md. Locked entries are rejected.",
 		Parameters: json.RawMessage(`{"type":"object",
@@ -267,7 +271,7 @@ func (t MemoryWrite) Call(ctx context.Context, args json.RawMessage) (string, er
 func RegisterAll(reg *tool.Registry, env *Env) error {
 	for _, t := range []tool.Tool{
 		AgentUpsert{env}, AgentRemove{env}, SkillWrite{env},
-		MemoryWrite{env}, ConfigPatch{env},
+		MemoryWrite{env}, ConfigPatch{env}, HistoryRollback{env},
 	} {
 		if err := reg.Register(t); err != nil {
 			return err

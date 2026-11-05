@@ -16,16 +16,7 @@ import (
 func yamlUnmarshal(b []byte, v any) error { return yaml.Unmarshal(b, v) }
 
 // knownTools returns the registered tool-name set for validation.
-func (e *Env) knownTools() map[string]bool {
-	out := map[string]bool{}
-	if e.Load == nil {
-		return out
-	}
-	// The loader closure re-reads state; tool-name validation is the
-	// caller's responsibility via Health. We accept a tool list injected
-	// through Env extension points instead.
-	return e.KnownToolsSet
-}
+func (e *Env) knownTools() map[string]bool { return e.KnownToolsSet }
 
 // ConfigPatch applies RFC 6902-style limited patches: set or remove
 // of top-level yaml paths (dot notation, e.g. "budget.max_turns").

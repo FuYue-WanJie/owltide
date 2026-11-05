@@ -54,9 +54,30 @@ func (s *Store) Head() (string, error) {
 	ref := strings.TrimSpace(strings.TrimPrefix(string(b), "ref: "))
 	id, err := os.ReadFile(filepath.Join(s.GitDir, filepath.FromSlash(ref)))
 	if os.IsNotExist(err) {
+		// git gc packs loose refs into packed-refs.
+		if pid, perr := s.readPackedRef(ref); perr == nil {
+			return pid, nil
+		}
 		return "", nil
 	}
 	return strings.TrimSpace(string(id)), err
+}
+
+// readPackedRef resolves a ref from .git/packed-refs.
+func (s *Store) readPackedRef(ref string) (string, error) {
+	data, err := os.ReadFile(filepath.Join(s.GitDir, "packed-refs"))
+	if err != nil {
+		return "", err
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if line == "" || line[0] == '#' || line[0] == '^' {
+			continue
+		}
+		if i := strings.IndexByte(line, ' '); i > 0 && line[i+1:] == ref {
+			return line[:i], nil
+		}
+	}
+	return "", os.ErrNotExist
 }
 
 // writeObject stores payload under its git type and returns the id.
@@ -83,8 +104,17 @@ func (s *Store) writeObject(typ string, payload []byte) (string, error) {
 	return id, os.WriteFile(dst, buf.Bytes(), 0o444)
 }
 
-// readObject loads and decodes a loose object.
+// readObject loads an object: loose first, then pack files.
 func (s *Store) readObject(id string) (typ string, payload []byte, err error) {
+	typ, payload, lerr := s.readLoose(id)
+	if lerr == nil {
+		return typ, payload, nil
+	}
+	return s.readFromPacks(id)
+}
+
+// readLoose decodes a loose object only.
+func (s *Store) readLoose(id string) (typ string, payload []byte, err error) {
 	raw, err := os.ReadFile(filepath.Join(s.GitDir, "objects", id[:2], id[2:]))
 	if err != nil {
 		return "", nil, err
@@ -121,7 +151,7 @@ func (s *Store) writeTree(rel string) (string, []treeEntry, error) {
 	}
 	var out []treeEntry
 	for _, e := range entries {
-		if e.Name() == ".git" {
+		if e.Name() == ".git" || (rel == "." && e.Name() == stashDir) {
 			continue
 		}
 		rp := filepath.ToSlash(filepath.Join(rel, e.Name()))
@@ -219,8 +249,35 @@ func (s *Store) commit(treeID, parent, msg string) (string, map[string]bool, err
 	if err != nil {
 		return "", nil, err
 	}
-	return id, changed, os.WriteFile(
-		filepath.Join(s.GitDir, "refs", "heads", "main"), []byte(id+"\n"), 0o644)
+	if err := os.WriteFile(
+		filepath.Join(s.GitDir, "refs", "heads", "main"), []byte(id+"\n"), 0o644); err != nil {
+		return "", nil, err
+	}
+	// A loose ref shadows packed-refs, but git gc may have packed it:
+	// strip the stale packed entry to avoid ambiguity.
+	s.removePackedRef("refs/heads/main")
+	return id, changed, nil
+}
+
+// removePackedRef deletes one ref line from packed-refs (best effort).
+func (s *Store) removePackedRef(ref string) {
+	data, err := os.ReadFile(filepath.Join(s.GitDir, "packed-refs"))
+	if err != nil {
+		return
+	}
+	var out []string
+	for _, line := range strings.Split(string(data), "\n") {
+		if line == "" || line[0] == '#' || line[0] == '^' {
+			out = append(out, line)
+			continue
+		}
+		if i := strings.IndexByte(line, ' '); i > 0 && line[i+1:] == ref {
+			continue // drop
+		}
+		out = append(out, line)
+	}
+	_ = os.WriteFile(filepath.Join(s.GitDir, "packed-refs"),
+		[]byte(strings.Join(out, "\n")), 0o644)
 }
 
 // diffTrees compares two trees (recursive, flat-entries flattened to

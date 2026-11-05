@@ -97,26 +97,13 @@ func (s *Store) Checkout(commitID string) error {
 	if err != nil {
 		return err
 	}
-	// Remove tracked files/dirs not present in the target tree.
+	// Sync the working tree to the target tree: remove tracked files
+	// that the target does not contain (walking known config dirs).
 	flat, err := s.flattenTree(treeID, "")
 	if err != nil {
 		return err
 	}
-	keep := map[string]bool{} // top-level names present in target
-	for name := range flat {
-		keep[strings.SplitN(name, "/", 2)[0]] = true
-	}
-	entries, _ := os.ReadDir(s.Dir)
-	for _, e := range entries {
-		if e.Name() == ".git" || e.Name() == "logs" {
-			continue
-		}
-		if !keep[e.Name()] {
-			if err := os.RemoveAll(filepath.Join(s.Dir, e.Name())); err != nil {
-				return err
-			}
-		}
-	}
+	removeStale(s.Dir, "", flat, map[string]bool{".git": true, "logs": true, stashDir: true})
 	if err := s.materialize(treeID, ""); err != nil {
 		return err
 	}
@@ -195,4 +182,45 @@ func (s *Store) ResolveCommit(id string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("commit %q not found", id)
+}
+
+// removeStale recursively removes files under root that are absent
+// from the target flat map. skip lists directory names to keep whole.
+func removeStale(root, rel string, target map[string]string, skip map[string]bool) {
+	full := root
+	if rel != "" {
+		full = filepath.Join(root, filepath.FromSlash(rel))
+	}
+	entries, err := os.ReadDir(full)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if rel == "" && skip[name] {
+			continue
+		}
+		child := name
+		if rel != "" {
+			child = rel + "/" + name
+		}
+		if e.IsDir() {
+			removeStale(root, child, target, skip)
+			// drop the dir when the target has no file under it
+			empty := true
+			for p := range target {
+				if strings.HasPrefix(p, child+"/") {
+					empty = false
+					break
+				}
+			}
+			if empty {
+				os.Remove(filepath.Join(root, filepath.FromSlash(child)))
+			}
+			continue
+		}
+		if _, ok := target[child]; !ok {
+			os.Remove(filepath.Join(full, name))
+		}
+	}
 }

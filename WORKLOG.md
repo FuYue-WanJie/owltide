@@ -60,9 +60,28 @@ cmd/owltide/  CLI 入口（chat 交互 / run 一次性）
 
 ## 4. 待办 / 下一步
 
-- P0 已全部完成，待用户指示 P1 方向
-- 候选（来自原始需求，未排期）：`~/.owltide` 自动 git 提交、agent.upsert 自进化、记忆系统
+- P1 已实现（见 1b 节），待真模型冲烟（用户同意后用 OWLTIDE_API_KEY）：让它「新建一个叫 reviewer 的子代理」，确认有定义文件和提交；再让它修改一个 locked 项，确认被拒
+- P0 已全部完成
 - 遗留：首次 run 曾测过 `poolside/laguna-xs-2.1`、`deepseek-ai/deepseek-v4.1-flash` 等其他端点模型，未系统对比工具调用能力，需要时可做模型选型评测
+
+## 1b. P1 计划与实现状态（2026-11-05）
+
+范围：可自我修改的配置层 + 护栏。架构定稿见 `docs/ARCHITECTURE.md` 3.1/4.1/4.2/5.1/5.2 节。
+
+已实现（全部单测覆盖、全绿）：
+- `core/store`：git 兼容提交引擎（SHA-1+zlib 对象、递归 tree、diff、log、Checkout、RevertLast、ResolveCommit、EnsureInit、AutoCommit 含 who/tool/session 元数据），零第三方依赖，Android 可用，真实 `git log` 可读
+- 锁定配置：`~/.owltide/locks.yaml`；`locks` 与 `config:budget` 永久锁定；`config:model.*`（模型身份）也拒绝 Agent 改；CLI `owltide lock/unlock` 仅用户可用；`history.rollback` 回滚前 stash 锁定路径、回滚后恢复
+- 自进化工具 6 件套：agent.upsert / agent.remove / skill.write / memory.write / config.patch / history.rollback；统一流程 校验→锁检查→写→commit→热重载→健康检查→失败 revert
+- 子代理 schema：`agents/*.yaml`（name/model/system_prompt/tools/budget 全校验，tools 只能是已注册工具）
+- 变更日报：`owltide changes [--since=24h]` 从提交历史列出 who/tool/session/files
+- CLI：init 先建布局再写配置；store 打开时 EnsureInit（保证回滚总有父提交）
+
+验收达成：`go build`、`GOOS=android GOARCH=arm64 CGO_ENABLED=0`、`go vet`、`gofmt` 全干净；单测覆盖 upsert 合法提交+热重载、非法拒绝不落盘、健康检查失败自动回滚、locked 拒改且可读、rollback 不动锁定项、changes 报告；P0 测试无回归。
+
+踩坑记录：
+- `agents.Save` 原来调 `Validate(nil)` 导致工具名校验误报——Validate 约定 nil=跳过工具名校验
+- Registry.Register 只存 Schema 名，writerTool 的 Schema/Call 必须用同名派生，否则注册名与调用名不一致
+- git tree 是嵌套结构，diff/checkout 必须递归 flatten，不能用顶层名对齐
 
 ## 5. 工作规则
 
@@ -79,3 +98,4 @@ cmd/owltide/  CLI 入口（chat 交互 / run 一次性）
 
 - [2026-11-04] P0 骨架开工：go.mod 初始化、platform/config/tool/model/decision/agent/cli 全部落地，单测全绿，修复 agent 内层循环轮数不递增导致死循环的 bug，android 交叉编译通过。中途曾误用 Agent 自身环境变量做 curl 探测，已纠正为项目专属 `OWLTIDE_API_KEY`。
 - [2026-11-05] P0 收尾：`go mod tidy` 依赖提交（`a8ac633`）；真模型端到端验收通过（用户端点 nemotron-3.5，建 hello.go 并运行成功）。首次 401 是因为 key 属 用户端点 而配置指向 deepseek，改配置后通过。P0 完成，11 个本地提交。
+- [2026-11-05] P1 实现完成：ARCHITECTURE.md 更新 + store/agents/evolve 三包 + CLI lock/unlock/changes，7 个新提交（`ff2462d..5c80a90` + docs）。全部单测绿、P0 无回归、Android 交叉编译过。真模型冲烟待用户同意。

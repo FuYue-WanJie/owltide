@@ -70,10 +70,11 @@ func (a *Agent) Run(ctx context.Context, userText string) (string, error) {
 	a.messages = append(a.messages, model.Message{Role: model.RoleUser, Content: userText})
 
 	var (
-		final    string
-		toolRecs []decision.ToolRecord
-		runErr   error
-		steps    int
+		final      string
+		toolRecs   []decision.ToolRecord
+		runErr     error
+		steps      int
+		budgetStop string // non-empty when a budget cap forced the wrap-up
 	)
 	for {
 		if ctx.Err() != nil {
@@ -82,10 +83,12 @@ func (a *Agent) Run(ctx context.Context, userText string) (string, error) {
 		}
 		steps++
 		if steps > a.maxTurns() {
+			budgetStop = "turn_limit"
 			final = a.wrapUp("turn limit reached")
 			break
 		}
 		if a.tokens > a.maxTokens() {
+			budgetStop = "token_budget"
 			final = a.wrapUp("token budget exhausted")
 			break
 		}
@@ -110,7 +113,7 @@ func (a *Agent) Run(ctx context.Context, userText string) (string, error) {
 		}
 	}
 
-	a.logTurn(start, userText, toolRecs, len(toolRecs) == 0, runErr)
+	a.logTurn(start, userText, toolRecs, len(toolRecs) == 0, runErr, budgetStop)
 	return final, runErr
 }
 
@@ -173,16 +176,22 @@ func (a *Agent) wrapUp(reason string) string {
 	return msg.Content
 }
 
-// logTurn writes the decision record.
-func (a *Agent) logTurn(start time.Time, input string, tools []decision.ToolRecord, repliedDirectly bool, err error) {
+// logTurn writes the decision record. budgetStop names the cap that
+// forced the wrap-up ("turn_limit" | "token_budget"), empty otherwise;
+// it is recorded as an error-outcome so truncation is visible in the log.
+func (a *Agent) logTurn(start time.Time, input string, tools []decision.ToolRecord, repliedDirectly bool, err error, budgetStop string) {
 	if a.opts.Decisions == nil {
 		return
 	}
 	outcome := decision.OutcomeSuccess
 	errMsg := ""
-	if err != nil {
+	switch {
+	case err != nil:
 		outcome = decision.OutcomeError
 		errMsg = err.Error()
+	case budgetStop != "":
+		outcome = decision.OutcomeError
+		errMsg = "budget stop: " + budgetStop + " (forced wrap-up)"
 	}
 	rec := decision.Record{
 		SessionID:       a.opts.SessionID,

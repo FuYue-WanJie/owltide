@@ -177,3 +177,72 @@ func TestAgentTurnLimit(t *testing.T) {
 		t.Fatal("expected a wrap-up summary")
 	}
 }
+
+// TestAgentBudgetStopLogged verifies that a budget-forced wrap-up is
+// recorded in the decision log as an error outcome.
+func TestAgentBudgetStopLogged(t *testing.T) {
+	srv := fakeLLM(t, 99, func(n int, req model.Request) string {
+		last := req.Messages[len(req.Messages)-1]
+		if last.Role == "user" && strings.Contains(last.Content, "System:") {
+			b, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{
+				"delta": map[string]any{"content": "stopped"},
+			}}})
+			return chunk(string(b)) + sseDone()
+		}
+		args, _ := json.Marshal(map[string]string{"command": "echo loop"})
+		tc := map[string]any{
+			"id": "call-x", "type": "function",
+			"function": map[string]string{"name": "run_shell", "arguments": string(args)},
+		}
+		b, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{
+			"delta": map[string]any{"tool_calls": []any{tc}},
+		}}})
+		return chunk(string(b)) + sseDone()
+	})
+
+	tmp := t.TempDir()
+	dl, err := decision.Open(tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dl.Close()
+
+	cfg := config.Default()
+	cfg.Budget.MaxTurns = 3
+
+	reg := tool.NewRegistry()
+	sh := tool.NewShell("/bin/sh", "-c", t.TempDir(), 5)
+	must(reg.Register(sh))
+
+	opts := agentOptions(cfg, model.NewClient(srv.URL, "k", srv.Client()), reg, dl)
+	a := New(opts)
+	reply, err := a.Run(context.Background(), "loop forever")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply == "" {
+		t.Fatal("expected a wrap-up summary")
+	}
+
+	// Read the decision log and check the budget stop is recorded.
+	entries, err := os.ReadDir(tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, e := range entries {
+		data, err := os.ReadFile(filepath.Join(tmp, e.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.Contains(line, `"outcome":"error"`) &&
+				strings.Contains(line, "budget stop: turn_limit") {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatal("budget stop not recorded in decisions log")
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -96,45 +97,63 @@ func (s *Store) Checkout(commitID string) error {
 	if err != nil {
 		return err
 	}
-	tree, err := s.readTree(treeID)
+	// Remove tracked files/dirs not present in the target tree.
+	flat, err := s.flattenTree(treeID, "")
 	if err != nil {
 		return err
 	}
-	// Remove tracked files not present in the target tree.
+	keep := map[string]bool{} // top-level names present in target
+	for name := range flat {
+		keep[strings.SplitN(name, "/", 2)[0]] = true
+	}
 	entries, _ := os.ReadDir(s.Dir)
 	for _, e := range entries {
-		if e.IsDir() || e.Name() == ".git" || e.Name() == "logs" {
+		if e.Name() == ".git" || e.Name() == "logs" {
 			continue
 		}
-		if _, ok := tree[e.Name()]; !ok {
-			if err := os.Remove(filepath.Join(s.Dir, e.Name())); err != nil {
+		if !keep[e.Name()] {
+			if err := os.RemoveAll(filepath.Join(s.Dir, e.Name())); err != nil {
 				return err
 			}
 		}
 	}
-	for _, sub := range []string{"agents", "skills", "memory", "channels"} {
-		dir := filepath.Join(s.Dir, sub)
-		os.MkdirAll(dir, 0o755)
-		subTreeID := ""
-		if subEntries, _ := os.ReadDir(dir); len(subEntries) > 0 {
-			if id, _, err := s.writeTree(sub); err == nil {
-				subTreeID = id
-			}
-		}
-		_ = subTreeID
+	if err := s.materialize(treeID, ""); err != nil {
+		return err
 	}
-	for name, blobID := range tree {
-		parts := strings.Split(name, "/")
-		dst := filepath.Join(s.Dir, filepath.FromSlash(name))
-		if len(parts) == 2 {
-			os.MkdirAll(filepath.Join(s.Dir, parts[0]), 0o755)
+	return nil
+}
+
+// materialize recursively writes tree objects to the working tree.
+func (s *Store) materialize(treeID, prefix string) error {
+	tree, err := s.readTree(treeID)
+	if err != nil {
+		return err
+	}
+	// Build a sorted deterministic order.
+	names := make([]string, 0, len(tree))
+	for n := range tree {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		id := tree[name]
+		typ, payload, err := s.readObject(id)
+		if err != nil {
+			return fmt.Errorf("read %s: %w", name, err)
 		}
-		typ, data, err := s.readObject(blobID)
-		if err != nil || typ != "blob" {
-			return fmt.Errorf("checkout %s: %v", name, err)
-		}
-		if err := os.WriteFile(dst, data, 0o644); err != nil {
-			return err
+		switch typ {
+		case "blob":
+			dst := filepath.Join(s.Dir, filepath.FromSlash(prefix+name))
+			os.MkdirAll(filepath.Dir(dst), 0o755)
+			if err := os.WriteFile(dst, payload, 0o644); err != nil {
+				return err
+			}
+		case "tree":
+			if err := s.materialize(id, prefix+name+"/"); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("unexpected object type %s for %s", typ, name)
 		}
 	}
 	return nil

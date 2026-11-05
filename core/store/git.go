@@ -223,26 +223,72 @@ func (s *Store) commit(treeID, parent, msg string) (string, map[string]bool, err
 		filepath.Join(s.GitDir, "refs", "heads", "main"), []byte(id+"\n"), 0o644)
 }
 
-// diffTrees compares two trees (flat dirs only) and returns changed paths.
+// diffTrees compares two trees (recursive, flat-entries flattened to
+// file paths) and returns changed file paths.
 func (s *Store) diffTrees(a, b string) (map[string]bool, error) {
-	ta, err := s.readTree(a)
+	fa, err := s.flattenTree(a, "")
 	if err != nil {
 		return nil, err
 	}
-	tb, err := s.readTree(b)
+	fb, err := s.flattenTree(b, "")
 	if err != nil {
 		return nil, err
 	}
 	out := map[string]bool{}
-	for name, id := range ta {
-		if tb[name] != id {
+	for name, id := range fa {
+		if fb[name] != id {
 			out[name] = true
 		}
 	}
-	for name, id := range tb {
-		if ta[name] != id {
+	for name, id := range fb {
+		if fa[name] != id {
 			out[name] = true
 		}
+	}
+	return out, nil
+}
+
+// flattenTree recursively maps file path -> blob id.
+func (s *Store) flattenTree(id, prefix string) (map[string]string, error) {
+	typ, payload, err := s.readObject(id)
+	if err != nil {
+		return nil, err
+	}
+	if typ != "tree" {
+		return nil, fmt.Errorf("%s is a %s, want tree", id, typ)
+	}
+	out := map[string]string{}
+	raw := payload
+	for len(raw) > 0 {
+		sp := bytes.IndexByte(raw, ' ')
+		nul := bytes.IndexByte(raw, 0)
+		if sp < 0 || nul < 0 || nul+21 > len(raw) {
+			return nil, fmt.Errorf("corrupt tree %s", id)
+		}
+		name := string(raw[sp+1 : nul])
+		hexID := hex.EncodeToString(raw[nul+1 : nul+21])
+		raw = raw[nul+21:]
+		if strings.HasPrefix(name, prefix) == false && prefix != "" {
+			// nested entries carry their own name; nothing to do
+		}
+		if len(hexID) == 40 {
+			// probe type: cheap via readObject
+			ot, _, err := s.readObject(hexID)
+			if err != nil {
+				return nil, err
+			}
+			if ot == "tree" {
+				sub, err := s.flattenTree(hexID, prefix+name+"/")
+				if err != nil {
+					return nil, err
+				}
+				for k, v := range sub {
+					out[k] = v
+				}
+				continue
+			}
+		}
+		out[prefix+name] = hexID
 	}
 	return out, nil
 }

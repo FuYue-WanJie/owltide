@@ -46,9 +46,9 @@ func (d Def) Validate(knownTools map[string]bool) error {
 	if len(d.Tools) == 0 {
 		return fmt.Errorf("tools must be a non-empty list")
 	}
-	for _, t := range d.Tools {
-		if !knownTools[t] {
-			return fmt.Errorf("unknown tool %q", t)
+	for _, tn := range d.Tools {
+		if knownTools != nil && !knownTools[tn] {
+			return fmt.Errorf("unknown tool %q", tn)
 		}
 	}
 	if d.Budget.MaxTurns <= 0 || d.Budget.MaxTokens <= 0 || d.Budget.ToolTimeoutSec <= 0 {

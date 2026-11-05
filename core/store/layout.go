@@ -91,3 +91,17 @@ func toRFC3339(unixSec string) string {
 	}
 	return time.Unix(sec, 0).UTC().Format(time.RFC3339)
 }
+
+// EnsureInit makes the first commit when HEAD is unborn, so later
+// rollbacks always have a parent to return to.
+func (s *Store) EnsureInit() error {
+	head, err := s.Head()
+	if err != nil {
+		return err
+	}
+	if head != "" {
+		return nil
+	}
+	_, _, err = s.AutoCommit(CommitMeta{Who: "user", Reason: "init"})
+	return err
+}

@@ -53,10 +53,14 @@ func (t HistoryRollback) Call(ctx context.Context, args json.RawMessage) (string
 	if err != nil {
 		return reject("commit %q not found", target)
 	}
-	// Refuse to touch locked paths: snapshot their current contents.
+	// Refuse to touch locked paths: stash + journal them in a
+	// crash-safe commit before mutating the working tree.
 	protected, err := t.Env.stashLocked()
 	if err != nil {
 		return reject("%v", err)
+	}
+	if err := t.Env.St.JournalLockedStash(protected, t.Env.SessionID); err != nil {
+		return reject("stash journal failed: %v", err)
 	}
 	meta := store.CommitMeta{Who: "agent", Tool: "history.rollback",
 		Game: t.Env.SessionID, Reason: "rollback to " + short(full)}
@@ -65,10 +69,17 @@ func (t HistoryRollback) Call(ctx context.Context, args json.RawMessage) (string
 		return reject("checkout failed: %v", err)
 	}
 	t.Env.restoreLocked(protected)
+	// Rollback finished: drop the crash-safety journal.
+	t.Env.St.ClearLockedStash()
 	commitID, changed, err := t.Env.St.AutoCommit(meta)
-	if err != nil || !changed {
+	if err != nil {
 		t.Env.tryRevert(prevHead)
-		return reject("rollback produced no changes or failed: %v", err)
+		return reject("rollback failed: %v", err)
+	}
+	if !changed {
+		// Working tree already matches the target (e.g. only locked
+		// paths differed and were preserved) — the goal state holds.
+		return "already at target state", nil
 	}
 	if t.Env.Load != nil {
 		if err := t.Env.Load(t.Env.Root); err != nil {

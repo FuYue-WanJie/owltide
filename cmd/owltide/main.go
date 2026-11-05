@@ -84,6 +84,10 @@ func openStore() (*store.Store, error) {
 	if err := st.EnsureInit(); err != nil {
 		return nil, err
 	}
+	// Finish any rollback interrupted by a crash: locked files win.
+	if err := st.RecoverStash(); err != nil {
+		return nil, err
+	}
 	return st, nil
 }
 

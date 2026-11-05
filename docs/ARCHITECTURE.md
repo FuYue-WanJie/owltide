@@ -54,6 +54,22 @@
 - 整个目录是一个本地 git 仓库，**每次改动自动提交**。
 - 核心代码不在这里，Agent 改不到自己的 Go 代码。
 
+### 3.1 P1 目录布局（实现定稿）
+
+```
+~/.owltide/
+  agents/      子代理定义（YAML：模型、提示词、可用工具、预算）
+  skills/      Skills（Markdown，P1 只管写文件）
+  memory/      记忆（Markdown，P1 只管写文件）
+  channels/    入口配置（QQ 群、触发词…，P1 只留目录）
+  config.yaml  全局配置
+  locks.yaml   锁定名单（见 5.1）
+  logs/        决策日志（.gitignore，不入 git）
+  .git/        自动提交仓库
+```
+
+`tools/`（自写 MCP 工具）留到 P2。
+
 ## 4. 自进化：专用配置工具
 
 不给 Agent 随手改文件，而是给它几把专用工具：
@@ -69,6 +85,31 @@
 
 每把工具都：**校验 schema → 写入 → git 提交 → 热重载 → 健康检查**，失败自动回滚。
 
+### 4.1 P1 实现定稿
+
+- P1 落地六把：`agent.upsert`、`agent.remove`、`skill.write`、`memory.write`、`config.patch`、`history.rollback`（`tool.create/tool.update` 留 P2）。
+- **统一流程（store.Transaction）**：校验 schema → 检查锁 → 写文件 → git 提交 → 热重载 → 健康检查；任一步失败自动 revert 到上一个提交，并把失败原因作为工具结果返回给模型。
+- **自动 git 选型**：`core/store` 手写极简提交引擎（SHA-1 + zlib 对象、tree/commit、refs、log），零第三方依赖——Android 未必有系统 git，go-git 违背依赖纪律。对象格式与标准 git 兼容，人可直接用 `git log` 查看。核心代码不依赖 cgo。
+- 提交信息记录：who（agent|user）、调用的工具、会话 ID。
+
+## 4.2 子代理定义（P1）
+
+`agents/*.yaml`，schema：
+
+```yaml
+name: reviewer            # 必填，^[a-z][a-z0-9-]*$，目录内唯一
+model: <模型名>            # 必填
+base_url: <可选，缺省用全局>
+system_prompt: <必填，非空>
+tools: [read_file, ...]   # 必填数组，只能是已注册工具名
+budget:                   # 必填，各项 > 0
+  max_turns: 10
+  max_tokens: 100000
+  tool_timeout_sec: 30
+```
+
+P1 只管增删改和加载（启动时读入并校验）；调度留 P2。
+
 ## 5. 自动通行（无人值守）下的护栏
 
 默认假设用户开着自动通行，护栏不能靠人盯：
@@ -79,6 +120,20 @@
 4. **预算**：每个子代理有 Token / 次数 / 时长上限。
 5. **工具隔离**：自写工具一律子进程运行，崩了不带崩核心。
 6. **变更日报**：每天汇总 Agent 改了自己什么，人有空时看一眼即可。
+
+### 5.1 锁定配置（P1 实现定稿）
+
+- 任何配置项、子代理、Skill 都可标为 `locked`，登记在 `~/.owltide/locks.yaml`。
+- 锁住的东西 Agent 照常**能用**，但自进化工具**改不了、删不了**——包括开着自动通行也一样。
+- **锁名单本身和预算上限永远锁定**：`locks.yaml` 与 `config:budget` 不接受来自 Agent 的修改，也不出现在可解锁范围之外。
+- 只有**人**能解锁：CLI `owltide lock <id>` / `owltide unlock <id>`，不注册为 Agent 工具。
+- `history.rollback` 绕不开锁：回滚生成的变更先过锁检查，命中锁定项的改动被剔除后再提交。
+- 锁 id 形如 `config:budget`、`agent:reviewer`、`skill:xxx.md`、`memory:xxx.md`。
+
+## 5.2 变更日报与决策日志（P1）
+
+- `owltide changes [--since 24h]`：从 store 的提交历史列出谁（agent/user）在何时用哪把工具改了什么（每提交的路径清单）。
+- 自进化工具的每次调用（含被拒绝的）写入 `decisions.jsonl`：v1 字段不改不删，经 `tools_called` 自然承载；若未来需要专属字段，升 v2 并在本文件记录迁移。
 
 ## 6. 运行在哪里
 

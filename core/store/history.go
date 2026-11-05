@@ -163,3 +163,17 @@ func (s *Store) RevertLast(reason string) (string, error) {
 	id, _, err := s.snapshot("revert: " + reason)
 	return id, err
 }
+
+// ResolveCommit expands a short commit id to the full one.
+func (s *Store) ResolveCommit(id string) (string, error) {
+	log, err := s.Log()
+	if err != nil {
+		return "", err
+	}
+	for _, c := range log {
+		if strings.HasPrefix(c.ID, id) {
+			return c.ID, nil
+		}
+	}
+	return "", fmt.Errorf("commit %q not found", id)
+}

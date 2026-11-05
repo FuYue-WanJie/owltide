@@ -39,8 +39,8 @@ func main() {
 	}
 	switch os.Args[1] {
 	case "init":
-		must(config.WriteDefault(config.Path()))
 		must(store.EnsureLayout(platform.ConfigDir(platform.New().Home())))
+		must(config.WriteDefault(config.Path()))
 		fmt.Println("wrote", config.Path())
 	case "chat":
 		runChat()
@@ -76,7 +76,15 @@ func openStore() (*store.Store, error) {
 	if err := store.EnsureLayout(dir); err != nil {
 		return nil, err
 	}
-	return store.Open(dir)
+	st, err := store.Open(dir)
+	if err != nil {
+		return nil, err
+	}
+	// First commit so rollbacks always have a parent.
+	if err := st.EnsureInit(); err != nil {
+		return nil, err
+	}
+	return st, nil
 }
 
 func lockCmd(op, id string) {

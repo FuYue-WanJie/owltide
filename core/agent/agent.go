@@ -36,6 +36,10 @@ type Options struct {
 	// Spill moves oversized tool results out of the context; nil keeps
 	// everything inline.
 	Spill *spill.Store
+	// Loop configures goal restatement and loop detection; zero uses
+	// defaults. TodoDir empty disables the todo tool.
+	Loop    LoopConfig
+	TodoDir string
 }
 
 // Agent runs the loop.
@@ -49,6 +53,11 @@ type Agent struct {
 	// lastSnap is the most recent trusted protected-set snapshot.
 	lastSnap   guard.Snapshot
 	prefixHash string // stable request prefix (system + tools)
+
+	todo  *TodoTool
+	loops *loopDetector
+	// loopStopped marks a loop-detector termination for the log.
+	loopStopped bool
 }
 
 // New creates an Agent with the system prompt in place. The request
@@ -62,6 +71,10 @@ func New(opts Options) *Agent {
 	a := &Agent{opts: opts}
 	a.messages = []model.Message{{Role: model.RoleSystem, Content: sys}}
 	a.prefixHash = a.computePrefixHash()
+	if opts.TodoDir != "" {
+		a.todo = &TodoTool{Dir: opts.TodoDir}
+	}
+	a.loops = &loopDetector{cfg: opts.Loop}
 	return a
 }
 
@@ -165,9 +178,29 @@ func (a *Agent) Run(ctx context.Context, userText string) (string, error) {
 		}
 
 		// Execute tools in order, feed results back.
+		loopStop := false
 		for _, tc := range msg.ToolCalls {
 			rec := a.execTool(ctx, tc)
 			toolRecs = append(toolRecs, rec)
+			// Loop detection on the last tool result.
+			if a.loops != nil && len(a.messages) > 0 {
+				last := a.messages[len(a.messages)-1]
+				input := tc.Function.Arguments
+				switch a.loops.observe(tc.Function.Name, input, last.Content) {
+				case "remind":
+					a.messages = append(a.messages, model.Message{
+						Role: model.RoleUser, Content: loopReminder,
+					})
+				case "stop":
+					loopStop = true
+				}
+			}
+		}
+		if loopStop {
+			final = a.wrapUp("loop detected: same tool call with same result repeated; stopping")
+			runErr = fmt.Errorf("loop detected; run stopped (see decisions log)")
+			a.loopStopped = true
+			break
 		}
 	}
 
@@ -179,7 +212,7 @@ func (a *Agent) Run(ctx context.Context, userText string) (string, error) {
 func (a *Agent) step(ctx context.Context) (model.Message, model.Usage, error) {
 	req := model.Request{
 		Model:    a.opts.Config.Model.Name,
-		Messages: a.messages,
+		Messages: a.viewForModel(),
 	}
 	if defs := a.opts.Tools.Definitions(); len(defs) > 0 {
 		req.Tools = defsToAny(defs)
@@ -300,6 +333,9 @@ func (a *Agent) logTurn(start time.Time, input string, tools []decision.ToolReco
 	outcome := decision.OutcomeSuccess
 	errMsg := ""
 	switch {
+	case a.loopStopped:
+		outcome = decision.OutcomeError
+		errMsg = "loop stop: repeated identical tool call (reminder ignored)"
 	case err != nil:
 		outcome = decision.OutcomeError
 		errMsg = err.Error()

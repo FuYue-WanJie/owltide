@@ -172,6 +172,9 @@ func setup() (agent.Options, func(), error) {
 	}
 	tool.SetSpillReader(func(ref string) (string, error) { return sp.Read(ref) })
 	_ = spill.CleanupSession(st.Dir, sessionID)
+	if err := reg.Register(agent.TodoTool{Dir: sp.Dir}); err != nil {
+		return agent.Options{}, nil, err
+	}
 	known := map[string]bool{}
 	for _, d := range reg.Definitions() {
 		known[d.Function.Name] = true
@@ -206,6 +209,7 @@ func setup() (agent.Options, func(), error) {
 		WorkDir:   workDir,
 		Guard:     gd,
 		Spill:     sp,
+		TodoDir:   sp.Dir,
 	}, cleanup, nil
 }
 

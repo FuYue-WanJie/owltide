@@ -47,6 +47,9 @@ type Function struct {
 type Usage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
+	// CachedTokens is the prefix served from the provider's cache
+	// (prompt_tokens_details.cached_tokens when present).
+	CachedTokens int `json:"cached_tokens,omitempty"`
 }
 
 // Total returns the combined token count.
@@ -155,13 +158,23 @@ func (c *Client) Stream(ctx context.Context, req Request, onDelta func(StreamRes
 				} `json:"delta"`
 				FinishReason string `json:"finish_reason"`
 			} `json:"choices"`
-			Usage *Usage `json:"usage"`
+			Usage *struct {
+				PromptTokens     int `json:"prompt_tokens"`
+				CompletionTokens int `json:"completion_tokens"`
+				Details          *struct {
+					CachedTokens int `json:"cached_tokens"`
+				} `json:"prompt_tokens_details"`
+			} `json:"usage"`
 		}
 		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
 			return Message{}, usage, fmt.Errorf("bad stream chunk: %w", err)
 		}
 		if chunk.Usage != nil {
-			usage = *chunk.Usage
+			usage.PromptTokens = chunk.Usage.PromptTokens
+			usage.CompletionTokens = chunk.Usage.CompletionTokens
+			if chunk.Usage.Details != nil {
+				usage.CachedTokens = chunk.Usage.Details.CachedTokens
+			}
 		}
 		for _, choice := range chunk.Choices {
 			delta := choice.Delta

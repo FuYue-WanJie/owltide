@@ -47,6 +47,19 @@ type Record struct {
 	Outcome string `json:"outcome"`
 	// Error carries the failure reason when Outcome != success.
 	Error string `json:"error,omitempty"`
+
+	// ---- v2 fields (added 2026-11-06; see docs/ARCHITECTURE.md 5.2).
+	// A record with SchemaV2 true uses the fields below. v1 records
+	// keep their exact shape; readers must tolerate both.
+
+	// SchemaV2 marks records that carry the extended fields.
+	SchemaV2 bool `json:"schema_v2,omitempty"`
+	// PrefixHash is the sha256 of the stable request prefix (system
+	// message + tool definitions) for this turn — identical bytes
+	// across turns enable provider-side prompt caching.
+	PrefixHash string `json:"prefix_hash,omitempty"`
+	// CachedTokens is the provider-reported cached prefix length.
+	CachedTokens int `json:"cached_tokens,omitempty"`
 }
 
 // Outcome values.

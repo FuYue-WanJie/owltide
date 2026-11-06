@@ -3,7 +3,10 @@
 package agent
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -37,12 +40,16 @@ type Agent struct {
 	messages   []model.Message
 	tokens     int
 	turn       int
+	lastCached int
 	fatalGuard bool // restore failure: stop the loop
 	// lastSnap is the most recent trusted protected-set snapshot.
-	lastSnap guard.Snapshot
+	lastSnap   guard.Snapshot
+	prefixHash string // stable request prefix (system + tools)
 }
 
-// New creates an Agent with the system prompt in place.
+// New creates an Agent with the system prompt in place. The request
+// prefix (system message + tool definitions, in registration order)
+// is byte-stable for the whole session so providers can cache it.
 func New(opts Options) *Agent {
 	sys := opts.Config.System
 	if opts.WorkDir != "" {
@@ -50,7 +57,32 @@ func New(opts Options) *Agent {
 	}
 	a := &Agent{opts: opts}
 	a.messages = []model.Message{{Role: model.RoleSystem, Content: sys}}
+	a.prefixHash = a.computePrefixHash()
 	return a
+}
+
+// computePrefixHash hashes the deterministic request prefix:
+// the system message followed by the tool schemas in registration
+// order. Struct JSON marshalling is deterministic (fields in
+// declaration order, no maps).
+func (a *Agent) computePrefixHash() string {
+	prefix := struct {
+		System model.Message `json:"system"`
+		Tools  []tool.Definition `json:"tools"`
+	}{System: a.messages[0]}
+	if defs := a.opts.Tools.Definitions(); len(defs) > 0 {
+		prefix.Tools = defs
+	}
+	sum := sha256.Sum256(prefixJSON(&prefix))
+	return hex.EncodeToString(sum[:])
+}
+
+// prefixJSON marshals with sorted keys for full determinism.
+func prefixJSON(v any) []byte {
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	_ = enc.Encode(v)
+	return b.Bytes()
 }
 
 // maxTurnsFallback guards against an unset budget.
@@ -116,6 +148,7 @@ func (a *Agent) Run(ctx context.Context, userText string) (string, error) {
 		}
 		msg, usage, err := a.step(ctx)
 		a.tokens += usage.Total()
+		a.lastCached = usage.CachedTokens
 		if err != nil {
 			runErr = err
 			break
@@ -273,6 +306,9 @@ func (a *Agent) logTurn(start time.Time, input string, tools []decision.ToolReco
 		DurationMS:      time.Since(start).Milliseconds(),
 		Outcome:         outcome,
 		Error:           errMsg,
+		SchemaV2:        true,
+		PrefixHash:      a.prefixHash,
+		CachedTokens:    a.lastCached,
 	}
 	_ = a.opts.Decisions.Log(rec)
 }

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -147,6 +149,64 @@ func pathsForLockID(root, id string) []string {
 	return nil
 }
 
+// CacheStats summarizes provider prompt-cache hits from decisions.
+type CacheStats struct {
+	Turns        int
+	CachedTokens int
+	PromptTokens int
+	PrefixStable bool // all turns share one prefix hash
+}
+
+// CacheHitRate is CachedTokens / PromptTokens, 0 when no data.
+func (c CacheStats) CacheHitRate() float64 {
+	if c.PromptTokens == 0 {
+		return 0
+	}
+	return float64(c.CachedTokens) / float64(c.PromptTokens)
+}
+
+// ReadCacheStats reads ~/.owltide/logs/decisions.jsonl.
+func ReadCacheStats(root string) (CacheStats, error) {
+	var cs CacheStats
+	dir := filepath.Join(root, "logs")
+	entries, err := os.ReadDir(dir)
+	if os.IsNotExist(err) {
+		return cs, nil
+	}
+	if err != nil {
+		return cs, err
+	}
+	prefixes := map[string]bool{}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			var rec struct {
+				PromptTokens int    `json:"prompt_tokens"`
+				CachedTokens int    `json:"cached_tokens"`
+				PrefixHash   string `json:"prefix_hash"`
+				SchemaV2     bool   `json:"schema_v2"`
+			}
+			if json.Unmarshal([]byte(line), &rec) != nil || !rec.SchemaV2 {
+				continue
+			}
+			cs.Turns++
+			cs.PromptTokens += rec.PromptTokens
+			cs.CachedTokens += rec.CachedTokens
+			if rec.PrefixHash != "" {
+				prefixes[rec.PrefixHash] = true
+			}
+		}
+	}
+	cs.PrefixStable = len(prefixes) <= 1
+	return cs, nil
+}
+
 // ChangesReport renders the change journal since a duration.
 func ChangesReport(st *store.Store, since time.Duration) (string, error) {
 	log, err := st.Log()
@@ -173,7 +233,11 @@ func ChangesReport(st *store.Store, since time.Duration) (string, error) {
 		n++
 	}
 	if n == 0 {
-		return "no changes in the period", nil
+		b.WriteString("no changes in the period\n")
+	}
+	if cs, err := ReadCacheStats(st.Dir); err == nil && cs.Turns > 0 {
+		fmt.Fprintf(&b, "\ncache: %d turns, %.1f%% prompt tokens served from provider cache (prefix stable: %v)\n",
+			cs.Turns, cs.CacheHitRate()*100, cs.PrefixStable)
 	}
 	return b.String(), nil
 }

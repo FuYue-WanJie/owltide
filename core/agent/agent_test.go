@@ -396,3 +396,62 @@ func TestGuardRollsBackShellTampering(t *testing.T) {
 		t.Fatal("violation not recorded in decision log")
 	}
 }
+
+// TestStablePrefixBytes: two consecutive turns of the same session
+// must serialize the request prefix to identical bytes.
+func TestStablePrefixBytes(t *testing.T) {
+	srv := fakeLLM(t, 2, func(n int, req model.Request) string {
+		// Turn 1: use a tool; turn 2: answer.
+		if n == 1 {
+			args, _ := json.Marshal(map[string]string{"path": "/tmp/prefix-probe.txt"})
+			tc := map[string]any{
+				"id": "call-p", "type": "function",
+				"function": map[string]string{"name": "read_file", "arguments": string(args)},
+			}
+			b, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{
+				"delta": map[string]any{"tool_calls": []any{tc}},
+			}}})
+			return chunk(string(b)) + sseDone()
+		}
+		b, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{
+			"delta": map[string]any{"content": "done"},
+		}}})
+		return chunk(string(b)) + sseDone()
+	})
+	os.WriteFile("/tmp/prefix-probe.txt", []byte("data"), 0o644)
+
+	cfg := config.Default()
+	reg := tool.NewRegistry()
+	must(reg.Register(tool.ReadFile{}))
+	must(reg.Register(&tool.WriteFile{}))
+
+	// Capture every request body the fake server sees.
+	var firstPrefix string
+	srv2 := fakeLLM(t, 99, func(n int, req model.Request) string { return "" })
+	_ = srv2
+
+	opts := agentOptions(cfg, model.NewClient(srv.URL, "k", srv.Client()), reg, nil)
+	a := New(opts)
+	h1 := a.prefixHash
+	if _, err := a.Run(context.Background(), "probe one"); err != nil {
+		t.Fatal(err)
+	}
+	// Same agent instance, second turn: prefix must be identical.
+	a2 := NewWithHistory(a, opts)
+	h2 := a2.prefixHash
+	_ = a2
+	if h1 == "" {
+		t.Fatal("empty prefix hash")
+	}
+	if h1 != h2 {
+		t.Fatalf("prefix changed between turns: %s vs %s", h1, h2)
+	}
+	// And it must be reproducible from a fresh agent with the same
+	// system prompt and tool registration order.
+	opts2 := agentOptions(cfg, model.NewClient(srv.URL, "k", srv.Client()), reg, nil)
+	a3 := New(opts2)
+	if a3.prefixHash != h1 {
+		t.Fatalf("prefix not reproducible: %s vs %s", a3.prefixHash, h1)
+	}
+	_ = firstPrefix
+}

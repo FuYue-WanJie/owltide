@@ -43,7 +43,7 @@ cmd/owltide/  CLI 入口（chat 交互 / run 一次性）
 **P0 验收记录（2026-11-05）**：
 - `go build ./...` 通过；`GOOS=android GOARCH=arm64 CGO_ENABLED=0 go build` 通过
 - 单测全绿（假服务器模拟流式文本 + 工具调用 + 多轮 + 决策日志 + 轮数上限）
-- 真模型端到端：用户端点 的 nemotron-3.5-super-vl-120b-a12b 自主调 list_dir → write_file → run_shell 建 hello.go 并运行成功；decisions.jsonl 每轮有记录（含失败轮）
+- 真模型端到端：用户端点的 nemotron-3.5-super-vl-120b-a12b 自主调 list_dir → write_file → run_shell 建 hello.go 并运行成功；decisions.jsonl 每轮有记录（含失败轮）
 - 11 个本地提交：`05bc5ac`（文档）→ `a8ac633`，conventional commits 英文
 
 ## 2. 当前模型配置
@@ -97,7 +97,7 @@ cmd/owltide/  CLI 入口（chat 交互 / run 一次性）
 ## 日志
 
 - [2026-11-04] P0 骨架开工：go.mod 初始化、platform/config/tool/model/decision/agent/cli 全部落地，单测全绿，修复 agent 内层循环轮数不递增导致死循环的 bug，android 交叉编译通过。中途曾误用 Agent 自身环境变量做 curl 探测，已纠正为项目专属 `OWLTIDE_API_KEY`。
-- [2026-11-05] P0 收尾：`go mod tidy` 依赖提交（`a8ac633`）；真模型端到端验收通过（用户端点 nemotron-3.5，建 hello.go 并运行成功）。首次 401 是因为 key 属 用户端点 而配置指向 deepseek，改配置后通过。P0 完成，11 个本地提交。
+- [2026-11-05] P0 收尾：`go mod tidy` 依赖提交（`a8ac633`）；真模型端到端验收通过（用户端点的 nemotron-3.5，建 hello.go 并运行成功）。首次 401 是因为 key 属用户端点 而配置指向 deepseek，改配置后通过。P0 完成，11 个本地提交。
 - [2026-11-05] P1 实现完成：ARCHITECTURE.md 更新 + store/agents/evolve 三包 + CLI lock/unlock/changes，7 个新提交（`ff2462d..5c80a90` + docs）。全部单测绿、P0 无回归、Android 交叉编译过。
 - [2026-11-06] P1 三点补强（用户复核意见）：
   - git 兼容：引擎现在写 `.git/index`（v2）——真 `git status` 干净；读取支持 pack（idx v2 + ofs/ref delta）与 packed-refs——外部 `git gc` 后引擎照常读历史/提交/回滚；Checkout 改为精确文件级同步（修了「顶层目录在目标树就跳过子文件删除」的 bug）；`logs/` 永不入提交（writeTree 跳过）。全周期测试：自动提交→fsck→gc→引擎 Log/RevertLast/继续提交→再 fsck→再 gc

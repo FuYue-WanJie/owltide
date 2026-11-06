@@ -98,4 +98,10 @@ cmd/owltide/  CLI 入口（chat 交互 / run 一次性）
 
 - [2026-11-04] P0 骨架开工：go.mod 初始化、platform/config/tool/model/decision/agent/cli 全部落地，单测全绿，修复 agent 内层循环轮数不递增导致死循环的 bug，android 交叉编译通过。中途曾误用 Agent 自身环境变量做 curl 探测，已纠正为项目专属 `OWLTIDE_API_KEY`。
 - [2026-11-05] P0 收尾：`go mod tidy` 依赖提交（`a8ac633`）；真模型端到端验收通过（用户端点 nemotron-3.5，建 hello.go 并运行成功）。首次 401 是因为 key 属 用户端点 而配置指向 deepseek，改配置后通过。P0 完成，11 个本地提交。
-- [2026-11-05] P1 实现完成：ARCHITECTURE.md 更新 + store/agents/evolve 三包 + CLI lock/unlock/changes，7 个新提交（`ff2462d..5c80a90` + docs）。全部单测绿、P0 无回归、Android 交叉编译过。真模型冲烟待用户同意。
+- [2026-11-05] P1 实现完成：ARCHITECTURE.md 更新 + store/agents/evolve 三包 + CLI lock/unlock/changes，7 个新提交（`ff2462d..5c80a90` + docs）。全部单测绿、P0 无回归、Android 交叉编译过。
+- [2026-11-06] P1 三点补强（用户复核意见）：
+  - git 兼容：引擎现在写 `.git/index`（v2）——真 `git status` 干净；读取支持 pack（idx v2 + ofs/ref delta）与 packed-refs——外部 `git gc` 后引擎照常读历史/提交/回滚；Checkout 改为精确文件级同步（修了「顶层目录在目标树就跳过子文件删除」的 bug）；`logs/` 永不入提交（writeTree 跳过）。全周期测试：自动提交→fsck→gc→引擎 Log/RevertLast/继续提交→再 fsck→再 gc
+  - 预算：运行时拦截本就有（steps>maxTurns / tokens>maxTokens → wrapUp 强制收尾）；补了「budget stop」写入 decisions.jsonl（outcome=error + "budget stop: turn_limit/token_budget"）+ 测试
+  - 锁的崩溃安全：rollback 前 stash 现在落盘成 `.lockstash/` 日志目录并先提交（不入树），Checkout 后恢复、完成即清；启动时 `RecoverStash()` 自动完成被打断的恢复（锁定文件永远赢）；中断模拟测试覆盖
+  - 端点兼容：模型端点只接受 `[a-zA-Z0-9_-]` 工具名——Agent 可见名改下划线（agent_upsert 等），提交元数据保留点号名（agent.upsert）
+  - 真模型冲烟（nemotron-3.5）：①「新建 reviewer 子代理」成功——定义文件+提交（who=agent tool=agent.upsert session=…）、真 git log 可读；②锁定 agent:reviewer 后让模型改/删——agent_upsert×2+agent_remove 全被拒、文件未动、决策日志有记录；③最终二进制隔离 HOME 复跑——git status 干净、fsck ok、logs/ 未入提交

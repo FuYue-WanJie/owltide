@@ -112,3 +112,8 @@ cmd/owltide/  CLI 入口（chat 交互 / run 一次性）
   2. agents/*.md 格式 `43bdeb8`：frontmatter（name/description/model/tools/budget）+ markdown body 即 system_prompt；Save/Load/Remove 全切 .md；Def.FilterRegistry 是白名单强制点（子代理注册表只含白名单工具，P2 调度接入）；校验新增 description 必填
   3. 危险命令强制确认 `178d8b3`：run_shell 检测 rm -rf（含组合 flag）/git push --force/-f/git reset --hard/mkfs/dd of=/dev/*/chmod -R 777/shutdown 系；write_file/edit_file 检测 locks.yaml；config:budget 沿用永久锁拒绝。Registry.SetConfirmer 注入用户确认回调（CLI stdin y/N），模型无法自证放行；无确认器（非交互）一律拒绝；拒绝经 tool error 通道进 decisions.jsonl（TestDangerousCommandLogged 验证）
   - 测试：agents roundtrip/frontmatter 解析/白名单过滤、danger 模式正负例、locks.yaml 门、agent 决策日志；全绿 + android 交叉编译 + gofmt/vet 干净
+
+- [2026-11-06] 危险命令确认两处漏洞修复（用户复核）：
+  1. 受保护文件事务守卫 `905cfb1`：新包 core/guard——每次工具调用前后对受保护文件（locks.yaml、config.yaml、全部锁定项路径，动态含新锁）做哈希快照/比对；run_shell echo/sed/cp/tee 改锁文件会被检出、从 config store HEAD 恢复、结果替换为 PROTECTED FILE VIOLATION 并记入 decisions.jsonl。工具入口的确认门保留，守卫是兜底。测试：run_shell 改 locks.yaml → 必须被恢复 + 日志有记录
+  2. 命令拆分解析 `d5572e8`：mvdan.cc/sh（纯 Go、无 cgo）语法树拆管道/; /&&/嵌套 sh -c、bash -c、eval；sudo/doas 剥壳；xargs 透传递归。规则表（参考 Coren pkg/risk，只搬规则）：rm 递归+force（含 -fr、--recursive --force、组合/分离 flag）、find -delete/-exec、git push --force/-f/--force-with-lease/+main refspec、git clean -fdx、git reset --hard、git branch -D、mkfs*、dd of=/dev/*、chmod -R 777、shutdown 系。解析失败一律按危险处理（fail closed）。文档写明：这是减速带不是沙箱，变量展开无法穷举，core/guard 才是兜底，用户确认是最终权威
+  - 测试：24 个危险例（含全部用户列出的绕过手法）+ 8 个安全例全过；全量回归绿、android 交叉编译、泄漏扫描 0 命中

@@ -77,7 +77,7 @@ func (f *fixture) call(t *testing.T, name, args string) (string, error) {
 }
 
 const validAgent = `{
- "name":"reviewer","model":"m",
+ "name":"reviewer","model":"m","description":"reviews Go code",
  "system_prompt":"review things",
  "tools":["read_file"],
  "budget":{"max_turns":5,"max_tokens":1000,"tool_timeout_sec":10}
@@ -92,7 +92,7 @@ func TestAgentUpsertValidCommitsAndReloads(t *testing.T) {
 	if !strings.Contains(res, "ok") {
 		t.Fatalf("unexpected result %q", res)
 	}
-	if _, err := os.Stat(filepath.Join(f.root, "agents", "reviewer.yaml")); err != nil {
+	if _, err := os.Stat(filepath.Join(f.root, "agents", "reviewer.md")); err != nil {
 		t.Fatal("definition file missing")
 	}
 	log, _ := f.st.Log()
@@ -108,11 +108,11 @@ func TestAgentUpsertInvalidRejectedNotWritten(t *testing.T) {
 	f := newFixture(t)
 	before, _ := f.st.Head()
 	res, err := f.call(t, "agent_upsert",
-		`{"name":"Bad_Name","model":"m","system_prompt":"x","tools":["read_file"],"budget":{"max_turns":1,"max_tokens":1,"tool_timeout_sec":1}}`)
+		`{"name":"Bad_Name","model":"m","description":"x","system_prompt":"x","tools":["read_file"],"budget":{"max_turns":1,"max_tokens":1,"tool_timeout_sec":1}}`)
 	if err == nil || !strings.HasPrefix(err.Error(), RejectErr) {
 		t.Fatalf("want rejection, got res=%q err=%v", res, err)
 	}
-	if _, err := os.Stat(filepath.Join(f.root, "agents", "Bad_Name.yaml")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(f.root, "agents", "Bad_Name.md")); !os.IsNotExist(err) {
 		t.Fatal("invalid definition must not touch disk")
 	}
 	if head, _ := f.st.Head(); head != before {
@@ -127,7 +127,7 @@ func TestHealthFailureRollsBack(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "health check failed") {
 		t.Fatalf("want health rollback, got %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(f.root, "agents", "reviewer.yaml")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(f.root, "agents", "reviewer.md")); !os.IsNotExist(err) {
 		t.Fatal("file should be reverted")
 	}
 	// Working tree matches the pre-call commit.
@@ -149,7 +149,7 @@ func TestLockedAgentRejectsMutationButStaysUsable(t *testing.T) {
 	}
 	// Mutation rejected.
 	_, err := f.call(t, "agent_upsert",
-		`{"name":"reviewer","model":"m2","system_prompt":"x","tools":["read_file"],"budget":{"max_turns":5,"max_tokens":1000,"tool_timeout_sec":10}}`)
+		`{"name":"reviewer","model":"m2","description":"y","system_prompt":"x","tools":["read_file"],"budget":{"max_turns":5,"max_tokens":1000,"tool_timeout_sec":10}}`)
 	if err == nil || !strings.Contains(err.Error(), "locked") {
 		t.Fatalf("want locked rejection, got %v", err)
 	}
@@ -158,7 +158,7 @@ func TestLockedAgentRejectsMutationButStaysUsable(t *testing.T) {
 		t.Fatal("remove on locked agent must fail")
 	}
 	// File unchanged.
-	data, _ := os.ReadFile(filepath.Join(f.root, "agents", "reviewer.yaml"))
+	data, _ := os.ReadFile(filepath.Join(f.root, "agents", "reviewer.md"))
 	if !strings.Contains(string(data), "model: m\n") {
 		t.Fatalf("locked file was modified: %q", data)
 	}
@@ -184,7 +184,7 @@ func TestRollbackPreservesLocked(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(f.root, "skills", "greet.md")); !os.IsNotExist(err) {
 		t.Fatal("unlocked file should be rolled back")
 	}
-	data, err := os.ReadFile(filepath.Join(f.root, "agents", "reviewer.yaml"))
+	data, err := os.ReadFile(filepath.Join(f.root, "agents", "reviewer.md"))
 	if err != nil || !strings.Contains(string(data), "reviewer") {
 		t.Fatalf("locked agent file must survive rollback: %v", err)
 	}

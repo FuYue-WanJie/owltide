@@ -138,7 +138,7 @@ func pathsForLockID(root, id string) []string {
 	case "locks":
 		return []string{joinPath(root, "locks.yaml")}
 	case "agent":
-		return []string{joinPath(root, "agents", parts[1]+".yaml")}
+		return []string{joinPath(root, "agents", parts[1]+".md")}
 	case "skill":
 		return []string{joinPath(root, "skills", parts[1]+".md")}
 	case "memory":

@@ -11,23 +11,60 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/FuYue-WanJie/owltide/core/tool"
 )
 
-// Def is one sub-agent definition (agents/<name>.yaml).
+// Def is one sub-agent definition (agents/<name>.md):
+// YAML frontmatter for the machine fields, markdown body as the
+// system prompt.
 type Def struct {
 	Name         string   `yaml:"name"`
+	Description  string   `yaml:"description"`
 	Model        string   `yaml:"model"`
 	BaseURL      string   `yaml:"base_url"` // optional, defaults to global
-	SystemPrompt string   `yaml:"system_prompt"`
+	SystemPrompt string   `yaml:"-"`        // markdown body
 	Tools        []string `yaml:"tools"`
 	Budget       Budget   `yaml:"budget"`
 }
 
+// frontmatter wraps fields as a markdown header block.
+func (d Def) frontmatter() string {
+	fm := d
+	fm.SystemPrompt = ""
+	data, _ := yaml.Marshal(fm)
+	return string(data)
+}
+
+// render produces the full markdown document.
+func (d Def) render() string {
+	return "---\n" + d.frontmatter() + "---\n\n" + strings.TrimSpace(d.SystemPrompt) + "\n"
+}
+
+// parseDef decodes a .md document into a Def.
+func parseDef(data []byte) (Def, error) {
+	var d Def
+	text := strings.TrimSpace(string(data))
+	if !strings.HasPrefix(text, "---") {
+		return d, fmt.Errorf("missing frontmatter")
+	}
+	rest := strings.TrimPrefix(text, "---")
+	end := strings.Index(rest, "\n---")
+	if end < 0 {
+		return d, fmt.Errorf("unclosed frontmatter")
+	}
+	if err := yaml.Unmarshal([]byte(rest[:end]), &d); err != nil {
+		return d, err
+	}
+	d.SystemPrompt = strings.TrimSpace(rest[end+4:])
+	return d, nil
+}
+
 // Budget caps one sub-agent run.
 type Budget struct {
-	MaxTurns       int `yaml:"max_turns"`
-	MaxTokens      int `yaml:"max_tokens"`
-	ToolTimeoutSec int `yaml:"tool_timeout_sec"`
+	MaxTurns       int `yaml:"max_turns" json:"max_turns"`
+	MaxTokens      int `yaml:"max_tokens" json:"max_tokens"`
+	ToolTimeoutSec int `yaml:"tool_timeout_sec" json:"tool_timeout_sec"`
 }
 
 var nameRe = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
@@ -37,11 +74,14 @@ func (d Def) Validate(knownTools map[string]bool) error {
 	if !nameRe.MatchString(d.Name) {
 		return fmt.Errorf("name %q must match %s", d.Name, nameRe)
 	}
+	if d.Description == "" {
+		return fmt.Errorf("description is required")
+	}
 	if d.Model == "" {
 		return fmt.Errorf("model is required")
 	}
 	if d.SystemPrompt == "" {
-		return fmt.Errorf("system_prompt is required")
+		return fmt.Errorf("system prompt body is required")
 	}
 	if len(d.Tools) == 0 {
 		return fmt.Errorf("tools must be a non-empty list")
@@ -75,7 +115,7 @@ func Load(root string, knownTools map[string]bool) (map[string]Def, error) {
 		return nil, err
 	}
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".yaml") {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
 			continue
 		}
 		path := filepath.Join(Dir(root), e.Name())
@@ -83,8 +123,8 @@ func Load(root string, knownTools map[string]bool) (map[string]Def, error) {
 		if err != nil {
 			return nil, err
 		}
-		var d Def
-		if err := yaml.Unmarshal(data, &d); err != nil {
+		d, err := parseDef(data)
+		if err != nil {
 			return nil, fmt.Errorf("%s: %w", e.Name(), err)
 		}
 		if err := d.Validate(knownTools); err != nil {
@@ -98,25 +138,41 @@ func Load(root string, knownTools map[string]bool) (map[string]Def, error) {
 	return out, nil
 }
 
-// Save writes one definition to agents/<name>.yaml.
+// Save writes one definition to agents/<name>.md.
 func Save(root string, d Def) error {
 	if err := d.Validate(nil); err != nil {
 		return err
 	}
-	data, err := yaml.Marshal(d)
-	if err != nil {
+	if err := os.MkdirAll(Dir(root), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(Dir(root), d.Name+".yaml"), data, 0o600)
+	return os.WriteFile(filepath.Join(Dir(root), d.Name+".md"), []byte(d.render()), 0o600)
 }
 
-// Remove deletes agents/<name>.yaml; missing fails.
+// Remove deletes agents/<name>.md; missing fails.
 func Remove(root, name string) error {
-	p := filepath.Join(Dir(root), name+".yaml")
+	p := filepath.Join(Dir(root), name+".md")
 	if _, err := os.Stat(p); os.IsNotExist(err) {
 		return fmt.Errorf("agent %q does not exist", name)
 	}
 	return os.Remove(p)
+}
+
+// FilterRegistry builds a registry exposing only the tools this
+// sub-agent whitelists; this is the enforcement point a scheduler
+// uses when spawning the sub-agent.
+func (d Def) FilterRegistry(reg *tool.Registry) (*tool.Registry, error) {
+	out := tool.NewRegistry()
+	for _, name := range d.Tools {
+		t, ok := reg.Get(name)
+		if !ok {
+			return nil, fmt.Errorf("tool %q not registered", name)
+		}
+		if err := out.Register(t); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }
 
 // Names lists agent names, sorted (for health checks and tool results).

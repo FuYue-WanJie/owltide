@@ -103,7 +103,22 @@ func (e *Env) guardLock(id string) error {
 // ---- agent.upsert / agent.remove ----
 
 type upsertArgs struct {
-	agents.Def `yaml:",inline"`
+	Name         string         `json:"name"`
+	Description  string         `json:"description"`
+	Model        string         `json:"model"`
+	BaseURL      string         `json:"base_url"`
+	SystemPrompt string         `json:"system_prompt"`
+	Tools        []string       `json:"tools"`
+	Budget       agents.Budget  `json:"budget"`
+}
+
+// def converts args into a validated-ready definition.
+func (a upsertArgs) def() agents.Def {
+	return agents.Def{
+		Name: a.Name, Description: a.Description, Model: a.Model,
+		BaseURL: a.BaseURL, SystemPrompt: a.SystemPrompt,
+		Tools: a.Tools, Budget: a.Budget,
+	}
 }
 
 // AgentUpsert creates or updates a sub-agent definition.
@@ -113,8 +128,9 @@ type AgentUpsert struct{ Env *Env }
 func (AgentUpsert) Schema() tool.Definition {
 	return tool.Definition{Type: "function", Function: tool.FunctionSchema{
 		Name: "agent_upsert",
-		Description: "Create or update a sub-agent definition in ~/.owltide/agents. " +
-			"Validated against the schema; locked agents are rejected. Fields: name, model, system_prompt, tools, budget{max_turns,max_tokens,tool_timeout_sec}, base_url(optional).",
+		Description: "Create or update a sub-agent definition in ~/.owltide/agents/<name>.md " +
+			"(frontmatter: name, description, model, tools, budget; body: system prompt). " +
+			"Locked agents are rejected.",
 		Parameters: json.RawMessage(`{"type":"object",
  "properties":{
    "name":{"type":"string"},
@@ -132,19 +148,20 @@ func (AgentUpsert) Schema() tool.Definition {
 // Call implements tool.Tool.
 func (t AgentUpsert) Call(ctx context.Context, args json.RawMessage) (string, error) {
 	var a upsertArgs
-	if err := yamlUnmarshal(args, &a); err != nil {
+	if err := json.Unmarshal(args, &a); err != nil {
 		return reject("bad arguments: %v", err)
 	}
-	if err := a.Def.Validate(t.Env.knownTools()); err != nil {
+	d := a.def()
+	if err := d.Validate(t.Env.knownTools()); err != nil {
 		return reject("invalid definition: %v", err)
 	}
-	if err := t.Env.guardLock(a.LockID()); err != nil {
+	if err := t.Env.guardLock(d.LockID()); err != nil {
 		return reject("%v", err)
 	}
 	meta := store.CommitMeta{Who: "agent", Tool: "agent.upsert",
-		Game: t.Env.SessionID, Reason: "upsert agent " + a.Name}
+		Game: t.Env.SessionID, Reason: "upsert agent " + d.Name}
 	return t.Env.commitWithRollback(ctx, meta, func() error {
-		return agents.Save(t.Env.Root, a.Def)
+		return agents.Save(t.Env.Root, d)
 	})
 }
 

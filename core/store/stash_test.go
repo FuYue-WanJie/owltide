@@ -15,23 +15,23 @@ func TestStashRecoveryAfterInterruptedRollback(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Agent v1 of a locked file.
-	write(t, s.Dir, "agents/r.yaml", "name: r\nmodel: m1\n")
+	write(t, s.Dir, "agents/r.md", "name: r\nmodel: m1\n")
 	if _, _, err := s.AutoCommit(CommitMeta{Who: "agent", Reason: "v1"}); err != nil {
 		t.Fatal(err)
 	}
 	// User upgrades it (v2) and locks it.
-	write(t, s.Dir, "agents/r.yaml", "name: r\nmodel: m2\n")
+	write(t, s.Dir, "agents/r.md", "name: r\nmodel: m2\n")
 	if _, _, err := s.AutoCommit(CommitMeta{Who: "user", Reason: "v2"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Lock("agent:r"); err != nil {
 		t.Fatal(err)
 	}
-	v2, _ := os.ReadFile(filepath.Join(s.Dir, "agents/r.yaml"))
+	v2, _ := os.ReadFile(filepath.Join(s.Dir, "agents/r.md"))
 
 	// Begin a rollback: journal the stash (like evolve does), then
 	// simulate the crash right after Checkout, before restore.
-	protected := map[string][]byte{"agents/r.yaml": v2}
+	protected := map[string][]byte{"agents/r.md": v2}
 	if err := s.JournalLockedStash(protected, "s1"); err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +41,7 @@ func TestStashRecoveryAfterInterruptedRollback(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Crash window: locked file is now the old v1 on disk.
-	data, _ := os.ReadFile(filepath.Join(s.Dir, "agents/r.yaml"))
+	data, _ := os.ReadFile(filepath.Join(s.Dir, "agents/r.md"))
 	if string(data) == string(v2) {
 		t.Fatal("precondition: file should be the old version after crash")
 	}
@@ -50,7 +50,7 @@ func TestStashRecoveryAfterInterruptedRollback(t *testing.T) {
 	if err := s.RecoverStash(); err != nil {
 		t.Fatalf("recover: %v", err)
 	}
-	data, _ = os.ReadFile(filepath.Join(s.Dir, "agents/r.yaml"))
+	data, _ = os.ReadFile(filepath.Join(s.Dir, "agents/r.md"))
 	if string(data) != string(v2) {
 		t.Fatalf("locked file not restored: %q", data)
 	}

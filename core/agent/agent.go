@@ -67,7 +67,7 @@ func New(opts Options) *Agent {
 // declaration order, no maps).
 func (a *Agent) computePrefixHash() string {
 	prefix := struct {
-		System model.Message `json:"system"`
+		System model.Message     `json:"system"`
 		Tools  []tool.Definition `json:"tools"`
 	}{System: a.messages[0]}
 	if defs := a.opts.Tools.Definitions(); len(defs) > 0 {

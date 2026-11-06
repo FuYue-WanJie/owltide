@@ -103,13 +103,13 @@ func (e *Env) guardLock(id string) error {
 // ---- agent.upsert / agent.remove ----
 
 type upsertArgs struct {
-	Name         string         `json:"name"`
-	Description  string         `json:"description"`
-	Model        string         `json:"model"`
-	BaseURL      string         `json:"base_url"`
-	SystemPrompt string         `json:"system_prompt"`
-	Tools        []string       `json:"tools"`
-	Budget       agents.Budget  `json:"budget"`
+	Name         string        `json:"name"`
+	Description  string        `json:"description"`
+	Model        string        `json:"model"`
+	BaseURL      string        `json:"base_url"`
+	SystemPrompt string        `json:"system_prompt"`
+	Tools        []string      `json:"tools"`
+	Budget       agents.Budget `json:"budget"`
 }
 
 // def converts args into a validated-ready definition.

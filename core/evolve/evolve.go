@@ -112,7 +112,7 @@ type AgentUpsert struct{ Env *Env }
 // Schema implements tool.Tool.
 func (AgentUpsert) Schema() tool.Definition {
 	return tool.Definition{Type: "function", Function: tool.FunctionSchema{
-		Name: "agent.upsert",
+		Name: "agent_upsert",
 		Description: "Create or update a sub-agent definition in ~/.owltide/agents. " +
 			"Validated against the schema; locked agents are rejected. Fields: name, model, system_prompt, tools, budget{max_turns,max_tokens,tool_timeout_sec}, base_url(optional).",
 		Parameters: json.RawMessage(`{"type":"object",
@@ -154,7 +154,7 @@ type AgentRemove struct{ Env *Env }
 // Schema implements tool.Tool.
 func (AgentRemove) Schema() tool.Definition {
 	return tool.Definition{Type: "function", Function: tool.FunctionSchema{
-		Name:        "agent.remove",
+		Name:        "agent_remove",
 		Description: "Remove a sub-agent definition by name. Locked agents are rejected.",
 		Parameters:  json.RawMessage(`{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}`),
 	}}
@@ -197,7 +197,7 @@ type writerTool struct {
 func (w writerTool) Schema() tool.Definition {
 	name := w.toolName
 	if name == "" {
-		name = w.what + ".write"
+		name = w.what + "_write"
 	}
 	return tool.Definition{Type: "function", Function: tool.FunctionSchema{
 		Name: name,

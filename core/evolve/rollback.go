@@ -19,7 +19,7 @@ type HistoryRollback struct{ Env *Env }
 // Schema implements tool.Tool.
 func (HistoryRollback) Schema() tool.Definition {
 	return tool.Definition{Type: "function", Function: tool.FunctionSchema{
-		Name:        "history.rollback",
+		Name:        "history_rollback",
 		Description: "Roll the configuration back to a previous commit by its id (short ids ok). Changes to locked items are preserved.",
 		Parameters: json.RawMessage(`{"type":"object",
  "properties":{"commit":{"type":"string"},"steps":{"type":"integer"}},

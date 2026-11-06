@@ -25,7 +25,7 @@ type ConfigPatch struct{ Env *Env }
 // Schema implements tool.Tool.
 func (ConfigPatch) Schema() tool.Definition {
 	return tool.Definition{Type: "function", Function: tool.FunctionSchema{
-		Name: "config.patch",
+		Name: "config_patch",
 		Description: "Patch ~/.owltide/config.yaml with dot-path set/remove ops, " +
 			"e.g. {\"op\":\"set\",\"path\":\"budget.max_turns\",\"value\":10}. " +
 			"Locked paths (config:budget, model identity) are rejected.",

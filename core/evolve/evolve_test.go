@@ -85,7 +85,7 @@ const validAgent = `{
 
 func TestAgentUpsertValidCommitsAndReloads(t *testing.T) {
 	f := newFixture(t)
-	res, err := f.call(t, "agent.upsert", validAgent)
+	res, err := f.call(t, "agent_upsert", validAgent)
 	if err != nil {
 		t.Fatalf("upsert: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestAgentUpsertValidCommitsAndReloads(t *testing.T) {
 	if len(log) != 2 { // init fixture commit + upsert
 		t.Fatalf("want 2 commits, got %d", len(log))
 	}
-	if _, _, toolName, session := store.ParseMessage(log[0].Msg); toolName != "agent.upsert" || session != "test-session" {
+	if _, who, toolName, session := store.ParseMessage(log[0].Msg); who != "agent" || session != "test-session" || toolName != "agent.upsert" {
 		t.Fatalf("meta not recorded: %q", log[0].Msg)
 	}
 }
@@ -107,7 +107,7 @@ func TestAgentUpsertValidCommitsAndReloads(t *testing.T) {
 func TestAgentUpsertInvalidRejectedNotWritten(t *testing.T) {
 	f := newFixture(t)
 	before, _ := f.st.Head()
-	res, err := f.call(t, "agent.upsert",
+	res, err := f.call(t, "agent_upsert",
 		`{"name":"Bad_Name","model":"m","system_prompt":"x","tools":["read_file"],"budget":{"max_turns":1,"max_tokens":1,"tool_timeout_sec":1}}`)
 	if err == nil || !strings.HasPrefix(err.Error(), RejectErr) {
 		t.Fatalf("want rejection, got res=%q err=%v", res, err)
@@ -123,7 +123,7 @@ func TestAgentUpsertInvalidRejectedNotWritten(t *testing.T) {
 func TestHealthFailureRollsBack(t *testing.T) {
 	f := newFixture(t)
 	f.healthOK = false
-	_, err := f.call(t, "agent.upsert", validAgent)
+	_, err := f.call(t, "agent_upsert", validAgent)
 	if err == nil || !strings.Contains(err.Error(), "health check failed") {
 		t.Fatalf("want health rollback, got %v", err)
 	}
@@ -141,20 +141,20 @@ func TestHealthFailureRollsBack(t *testing.T) {
 
 func TestLockedAgentRejectsMutationButStaysUsable(t *testing.T) {
 	f := newFixture(t)
-	if _, err := f.call(t, "agent.upsert", validAgent); err != nil {
+	if _, err := f.call(t, "agent_upsert", validAgent); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.st.Lock("agent:reviewer"); err != nil {
 		t.Fatal(err)
 	}
 	// Mutation rejected.
-	_, err := f.call(t, "agent.upsert",
+	_, err := f.call(t, "agent_upsert",
 		`{"name":"reviewer","model":"m2","system_prompt":"x","tools":["read_file"],"budget":{"max_turns":5,"max_tokens":1000,"tool_timeout_sec":10}}`)
 	if err == nil || !strings.Contains(err.Error(), "locked") {
 		t.Fatalf("want locked rejection, got %v", err)
 	}
 	// Removal rejected.
-	if _, err := f.call(t, "agent.remove", `{"name":"reviewer"}`); err == nil {
+	if _, err := f.call(t, "agent_remove", `{"name":"reviewer"}`); err == nil {
 		t.Fatal("remove on locked agent must fail")
 	}
 	// File unchanged.
@@ -166,10 +166,10 @@ func TestLockedAgentRejectsMutationButStaysUsable(t *testing.T) {
 
 func TestRollbackPreservesLocked(t *testing.T) {
 	f := newFixture(t)
-	if _, err := f.call(t, "agent.upsert", validAgent); err != nil {
+	if _, err := f.call(t, "agent_upsert", validAgent); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.call(t, "skill.write", `{"name":"greet","body":"# greet\n"}`); err != nil {
+	if _, err := f.call(t, "skill_write", `{"name":"greet","body":"# greet\n"}`); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.st.Lock("agent:reviewer"); err != nil {
@@ -177,7 +177,7 @@ func TestRollbackPreservesLocked(t *testing.T) {
 	}
 	// Roll back two steps (lock commit + skill write): greet.md goes
 	// away, locked agent definition stays.
-	_, err := f.call(t, "history.rollback", `{"steps":2}`)
+	_, err := f.call(t, "history_rollback", `{"steps":2}`)
 	if err != nil {
 		t.Fatalf("rollback: %v", err)
 	}
@@ -192,16 +192,16 @@ func TestRollbackPreservesLocked(t *testing.T) {
 
 func TestConfigPatchBudgetAndModelLocked(t *testing.T) {
 	f := newFixture(t)
-	_, err := f.call(t, "config.patch", `{"op":"set","path":"budget.max_turns","value":99}`)
+	_, err := f.call(t, "config_patch", `{"op":"set","path":"budget.max_turns","value":99}`)
 	if err == nil || !strings.Contains(err.Error(), "locked") {
 		t.Fatalf("budget must be always locked, got %v", err)
 	}
-	_, err = f.call(t, "config.patch", `{"op":"set","path":"model.name","value":"other"}`)
+	_, err = f.call(t, "config_patch", `{"op":"set","path":"model.name","value":"other"}`)
 	if err == nil || !strings.Contains(err.Error(), "locked") {
 		t.Fatalf("model identity must be locked, got %v", err)
 	}
 	// Non-protected path succeeds.
-	res, err := f.call(t, "config.patch", `{"op":"set","path":"system_prompt","value":"hello"}`)
+	res, err := f.call(t, "config_patch", `{"op":"set","path":"system_prompt","value":"hello"}`)
 	if err != nil || !strings.Contains(res, "ok") {
 		t.Fatalf("legal patch failed: %v", err)
 	}
@@ -213,7 +213,7 @@ func TestConfigPatchBudgetAndModelLocked(t *testing.T) {
 
 func TestChangesReportListsAgentEdits(t *testing.T) {
 	f := newFixture(t)
-	if _, err := f.call(t, "agent.upsert", validAgent); err != nil {
+	if _, err := f.call(t, "agent_upsert", validAgent); err != nil {
 		t.Fatal(err)
 	}
 	out, err := ChangesReport(f.st, 24*3600e9)

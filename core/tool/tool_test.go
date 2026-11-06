@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -27,29 +28,39 @@ func TestWriteReadEditList(t *testing.T) {
 
 	rf := ReadFile{}
 	got, err := rf.Call(ctx, raw(fileArgs{Path: filepath.Join(dir, "a/b.txt")}))
-	if err != nil || got != "hello\nworld" {
+	if err != nil || !strings.HasPrefix(got, "hello\nworld\n[sha256:") {
 		t.Fatalf("read: %q %v", got, err)
 	}
+	hash := strings.TrimSuffix(strings.TrimPrefix(got, "hello\nworld\n[sha256:"), "]")
 
 	ef := EditFile{}
-	if _, err := ef.Call(ctx, raw(editFileArgs{Old: "hello", New: "hi", fileArgs: fileArgs{Path: filepath.Join(dir, "a/b.txt")}})); err != nil {
+	// missing expect_sha256 must fail
+	if _, err := ef.Call(ctx, raw(editFileArgs{Old: "hello", New: "hi", fileArgs: fileArgs{Path: filepath.Join(dir, "a/b.txt")}})); err == nil {
+		t.Fatal("expected missing expect_sha256 to fail")
+	}
+	// anchored edit with the correct hash passes
+	if _, err := ef.Call(ctx, raw(editFileArgs{Old: "hello", New: "hi", Expect: hash, fileArgs: fileArgs{Path: filepath.Join(dir, "a/b.txt")}})); err != nil {
 		t.Fatal(err)
 	}
 	got, _ = rf.Call(ctx, raw(fileArgs{Path: filepath.Join(dir, "a/b.txt")}))
-	if got != "hi\nworld" {
+	if !strings.HasPrefix(got, "hi\nworld\n[sha256:") {
 		t.Fatalf("edit result: %q", got)
 	}
-
-	// non-unique old_string must fail ("o" appears in both "world" and "hi\nworld"? no:
-	// content is "hi\nworld"; "o" appears once). Use a string that repeats.
+	// stale hash must fail and return the latest fragment
 	if err := os.WriteFile(filepath.Join(dir, "a/b.txt"), []byte("aXaXa"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ef.Call(ctx, raw(editFileArgs{Old: "a", New: "x", fileArgs: fileArgs{Path: filepath.Join(dir, "a/b.txt")}})); err == nil {
+	_, err2 := ef.Call(ctx, raw(editFileArgs{Old: "a", New: "x", Expect: hash, fileArgs: fileArgs{Path: filepath.Join(dir, "a/b.txt")}}))
+	if err2 == nil || !strings.Contains(err2.Error(), "file changed since read") || !strings.Contains(err2.Error(), "aXaXa") {
+		t.Fatalf("expected stale-hash rejection with fragment, got %v", err2)
+	}
+
+	// non-unique old_string must fail (content "aXaXa": "a" repeats).
+	if _, err := ef.Call(ctx, raw(editFileArgs{Old: "a", New: "x", Expect: sha256Hex("aXaXa"), fileArgs: fileArgs{Path: filepath.Join(dir, "a/b.txt")}})); err == nil {
 		t.Fatal("expected ambiguous edit to fail")
 	}
 	// missing old_string must fail
-	if _, err := ef.Call(ctx, raw(editFileArgs{Old: "zzz", New: "x", fileArgs: fileArgs{Path: filepath.Join(dir, "a/b.txt")}})); err == nil {
+	if _, err := ef.Call(ctx, raw(editFileArgs{Old: "zzz", New: "x", Expect: sha256Hex("aXaXa"), fileArgs: fileArgs{Path: filepath.Join(dir, "a/b.txt")}})); err == nil {
 		t.Fatal("expected missing edit to fail")
 	}
 

@@ -2,12 +2,43 @@ package tool
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 )
+
+// sha256Hex hashes file content for anchored edits.
+func sha256Hex(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
+}
+
+// fragment returns a short view of the current content: context around
+// the first occurrence of want when present, else the head of the file.
+func fragment(content, want string) string {
+	const maxFrag = 1500
+	lines := strings.Split(content, "\n")
+	if i := strings.Index(content, want); i >= 0 && want != "" {
+		lineAt := strings.Count(content[:i], "\n")
+		lo, hi := lineAt-5, lineAt+6
+		if lo < 0 {
+			lo = 0
+		}
+		if hi > len(lines) {
+			hi = len(lines)
+		}
+		return clamp(strings.Join(lines[lo:hi], "\n"))
+	}
+	n := 25
+	if n > len(lines) {
+		n = len(lines)
+	}
+	return clamp(strings.Join(lines[:n], "\n"))
+}
 
 // maxOutput caps tool output fed back to the model.
 const maxOutput = 20_000
@@ -39,9 +70,11 @@ func (ReadFile) Schema() Definition {
 	return Definition{
 		Type: "function",
 		Function: FunctionSchema{
-			Name:        "read_file",
-			Description: "Read a text file. Returns the full content (truncated if huge).",
-			Parameters:  object(`"path":{"type":"string"}`, "path"),
+			Name: "read_file",
+			Description: "Read a text file. Returns the content followed by a final " +
+				"\n[sha256:<hex>] marker line. Pass that hash as expect_sha256 when " +
+				"calling edit_file on this path.",
+			Parameters: object(`"path":{"type":"string"}`, "path"),
 		},
 	}
 }
@@ -58,7 +91,7 @@ func (ReadFile) Call(_ context.Context, args json.RawMessage) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return clamp(string(data)), nil
+	return clamp(string(data)) + "\n[sha256:" + sha256Hex(string(data)) + "]", nil
 }
 
 // ---- write_file ----
@@ -104,8 +137,9 @@ func (WriteFile) Call(_ context.Context, args json.RawMessage) (string, error) {
 
 type editFileArgs struct {
 	fileArgs
-	Old string `json:"old_string"`
-	New string `json:"new_string"`
+	Old    string `json:"old_string"`
+	New    string `json:"new_string"`
+	Expect string `json:"expect_sha256"`
 }
 
 type EditFile struct{}
@@ -114,11 +148,14 @@ func (EditFile) Schema() Definition {
 	return Definition{
 		Type: "function",
 		Function: FunctionSchema{
-			Name:        "edit_file",
-			Description: "Exact string replacement in a file. old_string must match exactly once.",
+			Name: "edit_file",
+			Description: "Exact string replacement in a file. old_string must match exactly once. " +
+				"expect_sha256 must be the hash from your last read_file of this path; " +
+				"if the file changed since, the edit is rejected and the latest fragment is returned.",
 			Parameters: object(
-				`"path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"}`,
-				"path", "old_string", "new_string"),
+				`"path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"},`+
+					`"expect_sha256":{"type":"string"}`,
+				"path", "old_string", "new_string", "expect_sha256"),
 		},
 	}
 }
@@ -131,11 +168,18 @@ func (EditFile) Call(_ context.Context, args json.RawMessage) (string, error) {
 	if err := a.validate(); err != nil {
 		return "", err
 	}
+	if a.Expect == "" {
+		return "", fmt.Errorf("expect_sha256 is required; read_file the path first and pass its [sha256:...] marker")
+	}
 	data, err := os.ReadFile(a.Path)
 	if err != nil {
 		return "", err
 	}
 	content := string(data)
+	if cur := sha256Hex(content); cur != a.Expect {
+		return "", fmt.Errorf("file changed since read (expected sha256 %s, current %s); latest fragment:\n%s",
+			a.Expect, cur, fragment(content, a.Old))
+	}
 	count := strings.Count(content, a.Old)
 	switch count {
 	case 0:

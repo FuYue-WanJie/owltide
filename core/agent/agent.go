@@ -15,8 +15,8 @@ import (
 	"github.com/FuYue-WanJie/owltide/core/config"
 	"github.com/FuYue-WanJie/owltide/core/decision"
 	"github.com/FuYue-WanJie/owltide/core/guard"
-	"github.com/FuYue-WanJie/owltide/core/spill"
 	"github.com/FuYue-WanJie/owltide/core/model"
+	"github.com/FuYue-WanJie/owltide/core/spill"
 	"github.com/FuYue-WanJie/owltide/core/tool"
 )
 

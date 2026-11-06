@@ -2,8 +2,8 @@ package agent
 
 import (
 	"context"
-	"fmt"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -15,8 +15,8 @@ import (
 	"github.com/FuYue-WanJie/owltide/core/config"
 	"github.com/FuYue-WanJie/owltide/core/decision"
 	"github.com/FuYue-WanJie/owltide/core/guard"
-	"github.com/FuYue-WanJie/owltide/core/store"
 	"github.com/FuYue-WanJie/owltide/core/model"
+	"github.com/FuYue-WanJie/owltide/core/store"
 	"github.com/FuYue-WanJie/owltide/core/tool"
 )
 

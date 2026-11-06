@@ -101,9 +101,13 @@ type writeFileArgs struct {
 	Content string `json:"content"`
 }
 
-type WriteFile struct{}
+type WriteFile struct{ confirmer Confirmer }
 
-func (WriteFile) Schema() Definition {
+// setConfirmer implements confirmerHolder (pointer receiver so the
+// registry mutation is visible to Call).
+func (w *WriteFile) setConfirmer(c Confirmer) { w.confirmer = c }
+
+func (*WriteFile) Schema() Definition {
 	return Definition{
 		Type: "function",
 		Function: FunctionSchema{
@@ -116,13 +120,18 @@ func (WriteFile) Schema() Definition {
 	}
 }
 
-func (WriteFile) Call(_ context.Context, args json.RawMessage) (string, error) {
+func (w *WriteFile) Call(_ context.Context, args json.RawMessage) (string, error) {
 	var a writeFileArgs
 	if err := json.Unmarshal(args, &a); err != nil {
 		return "", err
 	}
 	if err := a.validate(); err != nil {
 		return "", err
+	}
+	if isLocksFile(a.Path) {
+		if err := confirmDanger(w.confirmer, "lock-file write", a.Path); err != nil {
+			return "", err
+		}
 	}
 	if err := os.MkdirAll(filepath.Dir(a.Path), 0o755); err != nil {
 		return "", err
@@ -142,9 +151,12 @@ type editFileArgs struct {
 	Expect string `json:"expect_sha256"`
 }
 
-type EditFile struct{}
+type EditFile struct{ confirmer Confirmer }
 
-func (EditFile) Schema() Definition {
+// setConfirmer implements confirmerHolder.
+func (e *EditFile) setConfirmer(c Confirmer) { e.confirmer = c }
+
+func (*EditFile) Schema() Definition {
 	return Definition{
 		Type: "function",
 		Function: FunctionSchema{
@@ -160,7 +172,7 @@ func (EditFile) Schema() Definition {
 	}
 }
 
-func (EditFile) Call(_ context.Context, args json.RawMessage) (string, error) {
+func (e *EditFile) Call(_ context.Context, args json.RawMessage) (string, error) {
 	var a editFileArgs
 	if err := json.Unmarshal(args, &a); err != nil {
 		return "", err
@@ -170,6 +182,11 @@ func (EditFile) Call(_ context.Context, args json.RawMessage) (string, error) {
 	}
 	if a.Expect == "" {
 		return "", fmt.Errorf("expect_sha256 is required; read_file the path first and pass its [sha256:...] marker")
+	}
+	if isLocksFile(a.Path) {
+		if err := confirmDanger(e.confirmer, "lock-file write", a.Path); err != nil {
+			return "", err
+		}
 	}
 	data, err := os.ReadFile(a.Path)
 	if err != nil {

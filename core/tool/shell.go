@@ -18,7 +18,7 @@ type shellArgs struct {
 }
 
 // Shell runs a command through the platform shell.
-// Timeout and output truncation protect the loop from runaway commands.
+// Timeout, output truncation, and the danger gate protect the loop.
 type Shell struct {
 	// ShellBinary is the shell program (e.g. /bin/sh).
 	ShellBinary string
@@ -28,15 +28,20 @@ type Shell struct {
 	TimeoutSec int
 	// WorkDir is the default working directory.
 	WorkDir string
+
+	confirmer Confirmer
 }
 
 // NewShell builds a Shell from platform defaults.
-func NewShell(shellBinary, shellArg, workDir string, timeoutSec int) Shell {
+func NewShell(shellBinary, shellArg, workDir string, timeoutSec int) *Shell {
 	if timeoutSec <= 0 {
 		timeoutSec = 60
 	}
-	return Shell{ShellBinary: shellBinary, ShellArg: shellArg, TimeoutSec: timeoutSec, WorkDir: workDir}
+	return &Shell{ShellBinary: shellBinary, ShellArg: shellArg, TimeoutSec: timeoutSec, WorkDir: workDir}
 }
+
+// setConfirmer implements confirmerHolder.
+func (s *Shell) setConfirmer(c Confirmer) { s.confirmer = c }
 
 func (Shell) Schema() Definition {
 	return Definition{
@@ -58,6 +63,11 @@ func (s Shell) Call(ctx context.Context, args json.RawMessage) (string, error) {
 	}
 	if a.Command == "" {
 		return "", fmt.Errorf("command is required")
+	}
+	if isDangerousCommand(a.Command) {
+		if err := confirmDanger(s.confirmer, "command", a.Command); err != nil {
+			return "", err
+		}
 	}
 	dir := s.WorkDir
 	if a.WorkingDir != "" {

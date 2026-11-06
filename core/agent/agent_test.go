@@ -86,7 +86,7 @@ func TestAgentLoopWithToolAndDecisionLog(t *testing.T) {
 	cfg.Budget.MaxTurns = 10
 
 	reg := tool.NewRegistry()
-	must(reg.Register(tool.WriteFile{}))
+	must(reg.Register(&tool.WriteFile{}))
 
 	dl, err := decision.Open(filepath.Join(tmp, "logs"))
 	if err != nil {
@@ -244,5 +244,64 @@ func TestAgentBudgetStopLogged(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("budget stop not recorded in decisions log")
+	}
+}
+
+// TestDangerousCommandLogged verifies a confirmation-gated rejection
+// lands in the decision log via the tool-error path.
+func TestDangerousCommandLogged(t *testing.T) {
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		t.Skip("no /bin/sh")
+	}
+	srv := fakeLLM(t, 2, func(n int, req model.Request) string {
+		last := req.Messages[len(req.Messages)-1]
+		if last.Role == "user" && strings.Contains(last.Content, "System:") ||
+			strings.Contains(last.Content, "(empty output)") == false && last.Role == "user" && n > 1 {
+			b, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{
+				"delta": map[string]any{"content": "understood"},
+			}}})
+			return chunk(string(b)) + sseDone()
+		}
+		args, _ := json.Marshal(map[string]string{"command": "rm -rf /tmp/nothing-here"})
+		tc := map[string]any{
+			"id": "call-d", "type": "function",
+			"function": map[string]string{"name": "run_shell", "arguments": string(args)},
+		}
+		b, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{
+			"delta": map[string]any{"tool_calls": []any{tc}},
+		}}})
+		return chunk(string(b)) + sseDone()
+	})
+
+	tmp := t.TempDir()
+	dl, err := decision.Open(tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dl.Close()
+
+	cfg := config.Default()
+	reg := tool.NewRegistry()
+	// No confirmer: rejection is the default in non-interactive mode.
+	must(reg.Register(tool.NewShell("/bin/sh", "-c", t.TempDir(), 5)))
+
+	opts := agentOptions(cfg, model.NewClient(srv.URL, "k", srv.Client()), reg, dl)
+	a := New(opts)
+	if _, err := a.Run(context.Background(), "delete the temp dir"); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, _ := os.ReadDir(tmp)
+	var found bool
+	for _, e := range entries {
+		data, _ := os.ReadFile(filepath.Join(tmp, e.Name()))
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.Contains(line, "user confirmation") {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatal("confirmation rejection not recorded in decision log")
 	}
 }

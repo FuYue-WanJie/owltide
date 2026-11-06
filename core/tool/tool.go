@@ -29,8 +29,9 @@ type Tool interface {
 
 // Registry holds tools by name.
 type Registry struct {
-	tools map[string]Tool
-	order []string
+	tools     map[string]Tool
+	order     []string
+	confirmer Confirmer
 }
 
 // NewRegistry returns an empty registry.
@@ -46,7 +47,21 @@ func (r *Registry) Register(t Tool) error {
 	}
 	r.tools[name] = Tool(t)
 	r.order = append(r.order, name)
+	if h, ok := t.(confirmerHolder); ok && r.confirmer != nil {
+		h.setConfirmer(r.confirmer)
+	}
 	return nil
+}
+
+// SetConfirmer wires the user-confirmation callback into every tool
+// that needs it (dangerous commands, lock-file writes).
+func (r *Registry) SetConfirmer(c Confirmer) {
+	r.confirmer = c
+	for _, t := range r.tools {
+		if h, ok := t.(confirmerHolder); ok {
+			h.setConfirmer(c)
+		}
+	}
 }
 
 // Get returns the tool by name.

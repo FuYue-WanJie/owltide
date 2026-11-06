@@ -144,7 +144,7 @@ func setup() (agent.Options, func(), error) {
 
 	shell := tool.NewShell(p.Shell(), p.ShellFlag(), workDir, cfg.Budget.ToolTimeoutSec)
 	reg := tool.NewRegistry()
-	for _, t := range []tool.Tool{tool.ReadFile{}, tool.WriteFile{}, tool.EditFile{}, tool.ListDir{}, shell} {
+	for _, t := range []tool.Tool{tool.ReadFile{}, &tool.WriteFile{}, &tool.EditFile{}, tool.ListDir{}, shell} {
 		if err := reg.Register(t); err != nil {
 			return agent.Options{}, nil, err
 		}
@@ -155,6 +155,9 @@ func setup() (agent.Options, func(), error) {
 	if err != nil {
 		return agent.Options{}, nil, err
 	}
+	// Dangerous actions (rm -rf, git push --force, locks.yaml writes)
+	// ask the human at the terminal; the model can never self-approve.
+	reg.SetConfirmer(confirmFromStdin)
 	sessionID := time.Now().UTC().Format("20060102-150405")
 	known := map[string]bool{}
 	for _, d := range reg.Definitions() {
@@ -251,4 +254,15 @@ func runOneShot(task string) {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
+}
+
+// confirmFromStdin asks the user a yes/no question on the terminal.
+func confirmFromStdin(prompt string) bool {
+	fmt.Printf("\n%s [y/N] > ", prompt)
+	sc := bufio.NewScanner(os.Stdin)
+	if !sc.Scan() {
+		return false
+	}
+	ans := strings.ToLower(strings.TrimSpace(sc.Text()))
+	return ans == "y" || ans == "yes"
 }

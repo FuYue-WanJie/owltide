@@ -361,7 +361,11 @@ func TestGuardRollsBackShellTampering(t *testing.T) {
 
 	cfg := config.Default()
 	reg := tool.NewRegistry()
-	must(reg.Register(tool.NewShell("/bin/sh", "-c", root, 5)))
+	sh := tool.NewShell("/bin/sh", "-c", root, 5)
+	// Simulate a user approving the dangerous command: the write goes
+	// through and the transaction guard must still roll it back.
+	sh.SetConfirmer(func(string) bool { return true })
+	must(reg.Register(sh))
 
 	opts := agentOptions(cfg, model.NewClient(srv.URL, "k", srv.Client()), reg, dl)
 	opts.Guard = gd

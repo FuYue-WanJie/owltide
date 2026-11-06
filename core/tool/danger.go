@@ -1,16 +1,20 @@
 package tool
 
 // Dangerous-command detection. Commands are parsed with a real shell
-// grammar (mvdan.cc/sh, pure Go, no cgo) and every sub-command in the
-// tree (pipelines, ;, &&, nested -c/eval wrappers) is checked against
-// a rule table. Parse failures are treated as dangerous (fail closed).
+// grammar (mvdan.cc/sh, pure Go, no cgo). Words are evaluated
+// statically on the syntax tree (Lit + SglQuoted + literal-only
+// DblQuoted); any word that cannot be evaluated statically (ParamExp,
+// CmdSubst, arithmetic, ...) marks the whole command dangerous — fail
+// closed. Pipelines, ;, &&, subshells and command substitutions are
+// walked; wrapper binaries (sudo, nohup, env, toybox, ...) are peeled
+// before matching the rule table.
 //
-// This is a speed bump, not a sandbox: variable expansion (unquoted
-// $VAR), aliases, functions, and deliberate obfuscation cannot be
-// exhaustively covered — rules below are a best-effort table adapted
-// from Coren's pkg/risk rule list. The transaction-level guard
-// (core/guard: protected-file hash rollback) is the real backstop,
-// and user confirmation is the final authority.
+// This is a speed bump, not a sandbox: quoted obfuscation of command
+// *names* is covered by static evaluation, but scripts that compute
+// their arguments at runtime, functions, aliases and non-shell
+// interpreters (python -c, perl -e) are known limitations. The
+// transaction-level guard (core/guard: protected-file rollback) is
+// the real backstop, and user confirmation is the final authority.
 
 import (
 	"fmt"
@@ -31,7 +35,6 @@ type confirmerHolder interface {
 // isDangerousCommand parses the command and checks every sub-command
 // against the rule table. Unparseable input is dangerous by default.
 func isDangerousCommand(cmd string) bool {
-	src := cmd
 	prog, err := syntax.NewParser().Parse(strings.NewReader(cmd), "")
 	if err != nil {
 		return true // fail closed on syntax we cannot model
@@ -41,15 +44,39 @@ func isDangerousCommand(cmd string) bool {
 		if danger {
 			return false
 		}
-		switch n := node.(type) {
-		case *syntax.CallExpr:
-			if commandIsDangerous(callExprText(src, n)) {
+		if r, ok := node.(*syntax.Redirect); ok {
+			// > locks.yaml / > config.yaml etc: any redirect into a
+			// protected file is dangerous by itself.
+			if r.Word != nil {
+				if target, err := evalWord(r.Word); err != nil {
+					danger = true
+					return false
+				} else if isLocksFile(target) || strings.HasSuffix(target, "/locks.yaml") {
+					danger = true
+					return false
+				}
+			}
+			return true
+		}
+		if c, ok := node.(*syntax.CallExpr); ok {
+			words, evalErr := evalWords(c.Args)
+			// Any non-statically-evaluable word is dangerous.
+			if evalErr != nil {
 				danger = true
 				return false
 			}
-			// Recurse into wrapped commands: sh -c '...', bash -c, eval.
-			for _, wrapped := range wrappedBodies(src, n) {
-				if isDangerousCommand(wrapped) {
+			if len(words) == 0 {
+				return true
+			}
+			// Peel wrapper binaries, then match the rule table.
+			rest, _ := peelWrappers(words)
+			if commandIsDangerous(rest) {
+				danger = true
+				return false
+			}
+			// sh -c 'script' / eval 'cmd': re-parse the body.
+			if body, ok := wrappedBody(rest); ok {
+				if isDangerousCommand(body) {
 					danger = true
 					return false
 				}
@@ -60,79 +87,283 @@ func isDangerousCommand(cmd string) bool {
 	return danger
 }
 
-// wordText returns the raw source text of a word (quotes included),
-// falling back to Lit for constructed words.
-func wordText(src string, w *syntax.Word) string {
-	p, e := int(w.Pos().Offset()), int(w.End().Offset())
-	if p >= 0 && e <= len(src) && p < e {
-		return src[p:e]
+// evalWords statically evaluates a word list. Returns an error when
+// any word contains runtime constructs we cannot resolve.
+func evalWords(args []*syntax.Word) ([]string, error) {
+	out := make([]string, 0, len(args))
+	for _, w := range args {
+		s, err := evalWord(w)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, s)
 	}
-	return w.Lit()
+	return out, nil
 }
 
-// callExprText renders a call back to its words (raw source text).
-func callExprText(src string, c *syntax.CallExpr) string {
-	var parts []string
-	for _, w := range c.Args {
-		parts = append(parts, wordText(src, w))
+// evalWord concatenates statically known parts of a word.
+func evalWord(w *syntax.Word) (string, error) {
+	var b strings.Builder
+	for _, part := range w.Parts {
+		switch p := part.(type) {
+		case *syntax.Lit:
+			b.WriteString(p.Value)
+		case *syntax.SglQuoted:
+			b.WriteString(p.Value)
+		case *syntax.DblQuoted:
+			for _, dp := range p.Parts {
+				if lit, ok := dp.(*syntax.Lit); ok {
+					b.WriteString(lit.Value)
+				} else {
+					return "", fmt.Errorf("non-literal in double quotes")
+				}
+			}
+		default:
+			// ParamExp, CmdSubst, ArithmExp, ProcSubst, ExtGlob...
+			return "", fmt.Errorf("word is not statically evaluable")
+		}
 	}
-	return strings.Join(parts, " ")
+	return b.String(), nil
 }
 
-// wrappedBodies extracts the command strings passed to sh -c / bash -c
-// / eval wrappers so nested commands are scanned. Raw source text keeps
-// quotes; unquoting is not needed because we re-parse after stripping.
-func wrappedBodies(src string, c *syntax.CallExpr) []string {
-	if len(c.Args) == 0 {
-		return nil
+// wrapperWord reports whether w is a wrapper binary that can be peeled
+// before scanning the wrapped command.
+func wrapperWord(w string) bool {
+	base := filepath.Base(w)
+	switch base {
+	case "sudo", "doas", "nohup", "timeout", "nice", "ionice",
+		"stdbuf", "time", "command", "exec", "env", "busybox", "toybox":
+		return true
 	}
-	base := filepath.Base(c.Args[0].Lit())
-	var out []string
+	return false
+}
+
+// peelWrappers strips wrapper binaries and their own options from the
+// word list, returning the innermost command. busybox/toybox rewrite
+// their applet as the first inner word.
+func peelWrappers(words []string) ([]string, bool) {
+	peeled := false
+	for len(words) > 0 && wrapperWord(words[0]) {
+		peeled = true
+		base := filepath.Base(words[0])
+		words = words[1:]
+		switch base {
+		case "env":
+			// skip -i/-u... and VAR=x assignments
+			for len(words) > 0 {
+				w := words[0]
+				if w == "-i" || w == "-u" || w == "--ignore-environment" {
+					words = words[1:]
+					if w == "-u" && len(words) > 0 {
+						words = words[1:] // -u takes a name
+					}
+					continue
+				}
+				if strings.HasPrefix(w, "-") {
+					words = words[1:]
+					continue
+				}
+				if strings.Contains(w, "=") { // VAR=x
+					words = words[1:]
+					continue
+				}
+				break
+			}
+		case "timeout":
+			// skip duration and its flags: timeout 10s cmd / timeout -k 5 10s cmd
+			for len(words) > 0 && strings.HasPrefix(words[0], "-") {
+				w := words[0]
+				words = words[1:]
+				if w == "-k" || w == "--kill-after" && len(words) > 0 {
+					words = words[1:]
+				}
+			}
+			if len(words) > 0 {
+				words = words[1:] // duration
+			}
+		case "nohup", "nice", "ionice", "stdbuf", "time", "command", "doas":
+			// skip own flags (e.g. nice -n 5, stdbuf -oL)
+			for len(words) > 0 && strings.HasPrefix(words[0], "-") {
+				w := words[0]
+				words = words[1:]
+				if w == "-n" && base == "nice" && len(words) > 0 {
+					words = words[1:]
+				}
+			}
+		case "sudo":
+			// skip options; -u USER / -g GROUP take a value
+			for len(words) > 0 {
+				w := words[0]
+				if w == "--" {
+					words = words[1:]
+					break
+				}
+				if !strings.HasPrefix(w, "-") {
+					break
+				}
+				words = words[1:]
+				if (w == "-u" || w == "-g" || w == "--user" || w == "--group") && len(words) > 0 {
+					words = words[1:]
+				}
+			}
+		}
+	}
+	// busybox/toybox applet: drop the applet name so rules match.
+	if len(words) > 0 {
+		base := filepath.Base(words[0])
+		if base == "busybox" || base == "toybox" {
+			if len(words) > 1 {
+				words = words[1:]
+				peeled = true
+			}
+		}
+	}
+	return words, peeled
+}
+
+// wrappedBody extracts the re-parsable body of `sh -c 'script'` /
+// `eval ...` word lists after peeling.
+func wrappedBody(words []string) (string, bool) {
+	if len(words) == 0 {
+		return "", false
+	}
+	base := filepath.Base(words[0])
 	switch base {
 	case "sh", "bash", "dash", "ash", "zsh", "ksh":
-		for i := 1; i+1 < len(c.Args); i++ {
-			if c.Args[i].Lit() == "-c" {
-				out = append(out, unquote(wordText(src, c.Args[i+1])))
+		for i := 1; i+1 < len(words); i++ {
+			if words[i] == "-c" {
+				return words[i+1], true
 			}
 		}
 	case "eval":
-		var words []string
-		for _, a := range c.Args[1:] {
-			words = append(words, unquote(wordText(src, a)))
-		}
-		if len(words) > 0 {
-			out = append(out, strings.Join(words, " "))
+		if len(words) > 1 {
+			return strings.Join(words[1:], " "), true
 		}
 	}
-	return out
+	return "", false
 }
 
-// unquote strips one layer of shell quoting so the body can be re-parsed.
-func unquote(s string) string {
-	s = strings.TrimSpace(s)
-	if len(s) >= 2 {
-		if (s[0] == '\'' && s[len(s)-1] == '\'') || (s[0] == '"' && s[len(s)-1] == '"') {
-			return s[1 : len(s)-1]
-		}
+// commandIsDangerous matches one peeled simple command (no operators)
+// against the rule table.
+func commandIsDangerous(words []string) bool {
+	if len(words) == 0 {
+		return false
 	}
-	return s
-}
-
-// rule is one dangerous-command signature from the risk table
-// (adapted from Coren pkg/risk rules — rules only, no plugin structure).
-type rule struct {
-	match func(words []string) bool
-	why   string
-}
-
-// hasFlag reports whether any word equals or starts with (for joined
-// short flags like -rf) the given flag.
-func hasFlag(words []string, flags ...string) bool {
-	for _, w := range words[1:] {
-		for _, f := range flags {
-			if w == f || (strings.HasPrefix(w, "-") && !strings.HasPrefix(w, "--") && strings.Contains(w[1:], f[1:])) {
+	// Recurse through wrappers so "sudo -u root rm -rf /" is matched.
+	if len(words) > 1 && wrapperWord(words[0]) {
+		rest, _ := peelWrappers(words)
+		if len(rest) < len(words) {
+			if commandIsDangerous(rest) {
 				return true
 			}
+		}
+	}
+	// Unescape backslash-escaped command names: \rm == rm.
+	name := strings.TrimPrefix(words[0], "\\")
+	base := filepath.Base(name)
+
+	recursive := func() bool {
+		for _, w := range words[1:] {
+			if w == "-r" || w == "-R" || w == "--recursive" ||
+				(strings.HasPrefix(w, "-") && !strings.HasPrefix(w, "--") && strings.ContainsAny(w[1:], "rR")) {
+				return true
+			}
+		}
+		return false
+	}
+	// git: skip global options (-C dir, -c k=v, --git-dir, --work-tree)
+	// before locating the subcommand.
+	if base == "git" {
+		i := 1
+		for i < len(words) {
+			w := words[i]
+			if w == "-C" || w == "--git-dir" || w == "--work-tree" {
+				i += 2
+				continue
+			}
+			if w == "-c" {
+				i += 2
+				continue
+			}
+			if strings.HasPrefix(w, "-") {
+				i++
+				continue
+			}
+			break
+		}
+		sub := wordAt(words, i)
+		switch sub {
+		case "push":
+			for _, w := range words[i+1:] {
+				if w == "--force" || w == "--force-with-lease" || w == "-f" || w == "--delete" {
+					return true
+				}
+				if strings.HasPrefix(w, "+") && len(w) > 1 {
+					return true // refspec +main
+				}
+			}
+		case "reset":
+			if hasFlag(words[i:], "--hard") {
+				return true
+			}
+		case "clean":
+			if hasFlag(words[i:], "-f", "--force", "-d", "-x", "-X", "-fd", "-fdx", "-xdf") {
+				return true
+			}
+		case "branch":
+			if hasFlag(words[i:], "-D") {
+				return true
+			}
+		case "filter-branch":
+			return true
+		}
+		return false
+	}
+
+	// xargs: scan the wrapped command.
+	if base == "xargs" && len(words) > 1 {
+		return commandIsDangerous(words[1:])
+	}
+
+	switch {
+	// Any command whose arguments or redirections touch the lock
+	// registry needs user sign-off (echo/sed/cp/mv/tee > locks.yaml).
+	case touchesLocksFile(words):
+		return true
+	case base == "rm" && recursive():
+		return true // rm -r anything is destructive; -f implied risk
+	case base == "find":
+		for _, w := range words[1:] {
+			if w == "-delete" || w == "-exec" || w == "-execdir" || w == "-ok" || w == "-okdir" {
+				return true
+			}
+		}
+		return false
+	case base == "mkfs" || strings.HasPrefix(base, "mkfs."):
+		return true
+	case base == "dd":
+		for _, w := range words[1:] {
+			if strings.HasPrefix(w, "of=/dev/") {
+				return true
+			}
+		}
+		return false
+	case base == "chmod" && hasFlag(words, "-R", "--recursive") && hasFlag(words, "777"):
+		return true
+	case base == "shutdown" || base == "reboot" || base == "poweroff" || base == "halt" || base == "init":
+		return true
+	}
+	return false
+}
+
+// touchesLocksFile reports whether the command references locks.yaml
+// (as an argument, redirect target, or here-doc tag). Redirections are
+// part of the Stmt, not the CallExpr, so the caller pre-filters; here
+// we check argument words only.
+func touchesLocksFile(words []string) bool {
+	for _, w := range words {
+		if isLocksFile(w) {
+			return true
 		}
 	}
 	return false
@@ -145,111 +376,16 @@ func wordAt(words []string, i int) string {
 	return ""
 }
 
-// commandIsDangerous matches one simple command (no operators) against
-// the rule table.
-func commandIsDangerous(text string) bool {
-	words := strings.Fields(text)
-	if len(words) == 0 {
-		return false
-	}
-	base := filepath.Base(wordAt(words, 0))
-	// sudo/doas prefix: check the wrapped command instead.
-	if base == "sudo" || base == "doas" {
-		if len(words) > 1 {
-			// skip flag arguments like -u user
-			rest := words[1:]
-			for len(rest) > 0 && strings.HasPrefix(rest[0], "-") {
-				rest = rest[1:]
-				// -u takes a value
-				if rest[0] != "" && rest[0][0] == '-' && len(rest) > 1 && strings.HasPrefix(rest[0], "-u") == false {
-				}
+func hasFlag(words []string, flags ...string) bool {
+	for _, w := range words {
+		for _, f := range flags {
+			if w == f {
+				return true
 			}
-			return commandIsDangerous(strings.Join(rest, " "))
-		}
-		return false
-	}
-
-	recursive := func() bool {
-		for _, w := range words[1:] {
-			if w == "-r" || w == "-R" || w == "--recursive" ||
-				(strings.HasPrefix(w, "-") && !strings.HasPrefix(w, "--") && strings.ContainsAny(w[1:], "rR")) {
+			if strings.HasPrefix(w, "-") && !strings.HasPrefix(w, "--") && strings.Contains(w[1:], strings.TrimPrefix(f, "-")) {
 				return true
 			}
 		}
-		return false
-	}
-	force := func() bool {
-		for _, w := range words[1:] {
-			if w == "-f" || w == "--force" ||
-				(strings.HasPrefix(w, "-") && !strings.HasPrefix(w, "--") && strings.Contains(w[1:], "f")) {
-				return true
-			}
-		}
-		return false
-	}
-
-	// xargs passes the wrapped command through; scan it recursively.
-	if base == "xargs" && len(words) > 1 {
-		return commandIsDangerous(strings.Join(words[1:], " "))
-	}
-
-	switch {
-	// rm -r -f / -rf / -fr / --recursive --force
-	case base == "rm" && recursive() && force():
-		return true
-	// find ... -delete or -exec rm
-	case base == "find":
-		for _, w := range words {
-			if w == "-delete" || w == "-execdir" {
-				return true
-			}
-			if w == "-exec" {
-				return true
-			}
-		}
-		return false
-	// git push variants
-	case base == "git" && wordAt(words, 1) == "push":
-		tail := words[2:]
-		for _, w := range tail {
-			if w == "--force" || w == "--force-with-lease" || w == "-f" {
-				return true
-			}
-			// refspec form: git push origin +main
-			if strings.HasPrefix(w, "+") && strings.Contains(w, "main") || strings.HasPrefix(w, "refs/heads/+") || (strings.HasPrefix(w, "+") && w != "+") {
-				return true
-			}
-		}
-		return false
-	case base == "git" && wordAt(words, 1) == "reset" && hasFlag(words, "--hard"):
-		return true
-	case base == "git" && (wordAt(words, 1) == "clean"):
-		if hasFlag(words, "-f", "--force") || hasFlag(words, "-d", "-x", "-fd", "-fdx", "-xdf") {
-			return true
-		}
-		return false
-	case base == "git" && wordAt(words, 1) == "branch" && hasFlag(words, "-D"):
-		return true
-	case base == "git" && wordAt(words, 1) == "filter-branch":
-		return true
-	case base == "git" && wordAt(words, 1) == "push" && hasFlag(words, "--delete"):
-		return true
-	// destructive fs / system
-	case base == "mkfs" || strings.HasPrefix(base, "mkfs."):
-		return true
-	case base == "dd":
-		for _, w := range words {
-			if strings.HasPrefix(w, "of=/dev/") {
-				return true
-			}
-		}
-		return false
-	case base == "chmod" && hasFlag(words, "-R", "--recursive") && hasFlag(words, "777"):
-		return true
-	case base == "shutdown" || base == "reboot" || base == "poweroff" || base == "halt" || base == "init":
-		return true
-	case base == "rm" && recursive(): // rm -r without -f is still destructive here
-		return true
 	}
 	return false
 }

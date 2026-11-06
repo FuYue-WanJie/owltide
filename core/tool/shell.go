@@ -40,8 +40,12 @@ func NewShell(shellBinary, shellArg, workDir string, timeoutSec int) *Shell {
 	return &Shell{ShellBinary: shellBinary, ShellArg: shellArg, TimeoutSec: timeoutSec, WorkDir: workDir}
 }
 
+// SetConfirmer wires the user-confirmation callback (exported for
+// tests and custom wirings).
+func (s *Shell) SetConfirmer(c Confirmer) { s.confirmer = c }
+
 // setConfirmer implements confirmerHolder.
-func (s *Shell) setConfirmer(c Confirmer) { s.confirmer = c }
+func (s *Shell) setConfirmer(c Confirmer) { s.SetConfirmer(c) }
 
 func (Shell) Schema() Definition {
 	return Definition{

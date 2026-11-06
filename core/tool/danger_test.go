@@ -73,6 +73,39 @@ func TestDangerPatterns(t *testing.T) {
 		"shutdown now",
 		// unparseable garbage is dangerous by default
 		"rm -rf $(echo /tmp/x' ",
+		// B1: quoted command names must not bypass (static word eval)
+		"'rm' -rf /tmp/x",
+		"rm \"-rf\" /tmp/x",
+		"\\rm -rf /tmp/x",
+		"r''m -rf /tmp/x",
+		// B1: non-static words are dangerous outright
+		"$X -rf /tmp",
+		"rm $(find /) ",
+		"rm -rf $TARGET",
+		// B2: sudo edge cases
+		"sudo -u root rm -rf /",
+		"sudo -E rm -rf /tmp/x",
+		"sudo -- rm -rf /tmp/x",
+		// B3: wrapper binaries
+		"env rm -rf /tmp/x",
+		"env VAR=1 -u HOME rm -rf /tmp/x",
+		"nohup rm -rf /tmp/x",
+		"timeout 10 rm -rf /tmp/x",
+		"nice -n 5 rm -rf /tmp/x",
+		"ionice rm -rf /tmp/x",
+		"stdbuf -oL rm -rf /tmp/x",
+		"time rm -rf /tmp/x",
+		"command rm -rf /tmp/x",
+		"exec rm -rf /tmp/x",
+		"busybox rm -rf /tmp/x",
+		"toybox rm -rf /tmp/x",
+		// B4: git global options before the subcommand
+		"git -C /repo push --force origin main",
+		"git -c x=y reset --hard HEAD~1",
+		"git --git-dir=/r push -f origin main",
+		"git -C /repo clean -fdx",
+		// A4: delayed write via nohup
+		"nohup sh -c 'sleep 5; echo x > locks.yaml' &",
 	}
 	for _, c := range dangerous {
 		if !isDangerousCommand(c) {

@@ -105,3 +105,10 @@ cmd/owltide/  CLI 入口（chat 交互 / run 一次性）
   - 锁的崩溃安全：rollback 前 stash 现在落盘成 `.lockstash/` 日志目录并先提交（不入树），Checkout 后恢复、完成即清；启动时 `RecoverStash()` 自动完成被打断的恢复（锁定文件永远赢）；中断模拟测试覆盖
   - 端点兼容：模型端点只接受 `[a-zA-Z0-9_-]` 工具名——Agent 可见名改下划线（agent_upsert 等），提交元数据保留点号名（agent.upsert）
   - 真模型冲烟（nemotron-3.5）：①「新建 reviewer 子代理」成功——定义文件+提交（who=agent tool=agent.upsert session=…）、真 git log 可读；②锁定 agent:reviewer 后让模型改/删——agent_upsert×2+agent_remove 全被拒、文件未动、决策日志有记录；③最终二进制隔离 HOME 复跑——git status 干净、fsck ok、logs/ 未入提交
+
+- [2026-11-06] P0+P1 推送完成：28+4 提交全部上 origin/main（fast-forward，无 force）。推送前对数澄清：之前报 16 是只数了 P1 段（a8ac633..HEAD），漏报 P0 的 11——P0 实际从未推送。未推历史经 filter-branch 洗掉 WORKLOG 里的私有端点域名（ltzy.top），终扫 sk-/ltzy/key 值 0 命中。
+- [2026-11-06] P1 补充三项（各自独立提交）：
+  1. 哈希锚定编辑 `1150c66`：read_file 尾部附 [sha256:...] 标记；edit_file 必填 expect_sha256，不匹配拒绝并返回最新片段（old_string 附近 ±5 行或文件头 25 行）
+  2. agents/*.md 格式 `43bdeb8`：frontmatter（name/description/model/tools/budget）+ markdown body 即 system_prompt；Save/Load/Remove 全切 .md；Def.FilterRegistry 是白名单强制点（子代理注册表只含白名单工具，P2 调度接入）；校验新增 description 必填
+  3. 危险命令强制确认 `178d8b3`：run_shell 检测 rm -rf（含组合 flag）/git push --force/-f/git reset --hard/mkfs/dd of=/dev/*/chmod -R 777/shutdown 系；write_file/edit_file 检测 locks.yaml；config:budget 沿用永久锁拒绝。Registry.SetConfirmer 注入用户确认回调（CLI stdin y/N），模型无法自证放行；无确认器（非交互）一律拒绝；拒绝经 tool error 通道进 decisions.jsonl（TestDangerousCommandLogged 验证）
+  - 测试：agents roundtrip/frontmatter 解析/白名单过滤、danger 模式正负例、locks.yaml 门、agent 决策日志；全绿 + android 交叉编译 + gofmt/vet 干净

@@ -50,20 +50,44 @@ func TestDangerPatterns(t *testing.T) {
 	dangerous := []string{
 		"rm -rf /tmp/x",
 		"rm -fr /tmp/x",
+		"rm --recursive --force /tmp/x",
 		"cd /tmp && rm -r -f x",
+		"rm file.txt && rm -rf dir",
+		"find /tmp -name '*.log' -delete",
+		"find . -type f -exec rm {} ;",
 		"git push --force origin main",
 		"git push -f origin main",
+		"git push --force-with-lease origin main",
+		"git push origin +main",
 		"git reset --hard HEAD~1",
+		"git clean -fdx",
+		"echo prelude && rm -rf /tmp/x",
+		"echo a; rm -rf /tmp/x",
+		"echo a | xargs rm -rf /tmp/x",
+		"sh -c 'rm -rf /tmp/x'",
+		"bash -c \"git push --force origin main\"",
+		"eval 'rm -rf /tmp/x'",
+		"sudo rm -rf /tmp/x",
 		"dd if=/dev/zero of=/dev/sda",
 		"chmod -R 777 /",
 		"shutdown now",
+		// unparseable garbage is dangerous by default
+		"rm -rf $(echo /tmp/x' ",
 	}
 	for _, c := range dangerous {
 		if !isDangerousCommand(c) {
 			t.Fatalf("%q must be dangerous", c)
 		}
 	}
-	safe := []string{"echo ok", "git push origin main", "git status", "rm file.txt", "git commit -am 'force the issue'"}
+	safe := []string{
+		"echo ok",
+		"git push origin main",
+		"git status",
+		"rm file.txt",
+		"git commit -am 'force the issue'",
+		"go test ./...",
+		"git diff HEAD",
+	}
 	for _, c := range safe {
 		if isDangerousCommand(c) {
 			t.Fatalf("%q must be safe", c)

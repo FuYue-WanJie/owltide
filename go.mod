@@ -1,5 +1,7 @@
 module github.com/FuYue-WanJie/owltide
 
-go 1.25.6
+go 1.26.0
 
 require gopkg.in/yaml.v3 v3.0.1
+
+require mvdan.cc/sh/v3 v3.14.1 // indirect

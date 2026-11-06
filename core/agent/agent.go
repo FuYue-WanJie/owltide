@@ -33,10 +33,13 @@ type Options struct {
 
 // Agent runs the loop.
 type Agent struct {
-	opts     Options
-	messages []model.Message
-	tokens   int
-	turn     int
+	opts       Options
+	messages   []model.Message
+	tokens     int
+	turn       int
+	fatalGuard bool // restore failure: stop the loop
+	// lastSnap is the most recent trusted protected-set snapshot.
+	lastSnap guard.Snapshot
 }
 
 // New creates an Agent with the system prompt in place.
@@ -85,6 +88,15 @@ func (a *Agent) Run(ctx context.Context, userText string) (string, error) {
 			runErr = ctx.Err()
 			break
 		}
+		// Delayed-write check: tampering may land after the tool
+		// returned (nohup ... &). Re-verify against the last trusted
+		// snapshot before every model call.
+		if a.opts.Guard != nil && a.lastSnap != nil {
+			if v, f := a.opts.Guard.Verify(a.lastSnap); len(v) > 0 || len(f) > 0 {
+				runErr = fmt.Errorf("protected files were modified outside tool calls; run aborted")
+				break
+			}
+		}
 		steps++
 		if steps > a.maxTurns() {
 			budgetStop = "turn_limit"
@@ -97,6 +109,11 @@ func (a *Agent) Run(ctx context.Context, userText string) (string, error) {
 			break
 		}
 
+		if a.fatalGuard {
+			final = a.wrapUp("guard restore failure; run aborted for safety")
+			runErr = fmt.Errorf("guard restore failed; run aborted")
+			break
+		}
 		msg, usage, err := a.step(ctx)
 		a.tokens += usage.Total()
 		if err != nil {
@@ -147,20 +164,36 @@ func (a *Agent) execTool(ctx context.Context, tc model.ToolCall) decision.ToolRe
 
 	var before guard.Snapshot
 	if a.opts.Guard != nil {
-		if snap, err := a.opts.Guard.Snapshot(); err == nil {
-			before = snap
+		snap, err := a.opts.Guard.Snapshot()
+		if err != nil {
+			// Fail closed: refuse the tool instead of skipping the guard.
+			rec := decision.ToolRecord{Name: tc.Function.Name, Error: "snapshot failed: " + err.Error()}
+			a.messages = append(a.messages, model.Message{
+				Role: model.RoleTool, Name: tc.Function.Name,
+				ToolCallID: tc.ID,
+				Content:    "tool refused: protected-file snapshot unavailable: " + err.Error(),
+			})
+			return rec
 		}
+		before = snap
+		a.lastSnap = snap
 	}
 
 	result, err := "tool not found", fmt.Errorf("tool %q not found", tc.Function.Name)
 	if t, ok := a.opts.Tools.Get(tc.Function.Name); ok {
-		result, err = t.Call(ctx, json.RawMessage(tc.Function.Arguments))
+		if a.opts.Guard != nil && before == nil {
+			// Cannot take a snapshot: refuse to run the tool at all.
+			err = fmt.Errorf("protected-file snapshot unavailable; tool %q refused (fail closed)", tc.Function.Name)
+		} else {
+			result, err = t.Call(ctx, json.RawMessage(tc.Function.Arguments))
+		}
 	}
 
 	if a.opts.Guard != nil && before != nil {
-		if violated, verr := a.opts.Guard.Verify(before); verr == nil && len(violated) > 0 {
+		violated, failed := a.opts.Guard.Verify(before)
+		if len(violated) > 0 {
 			violation := fmt.Sprintf(
-				"PROTECTED FILE VIOLATION: %s was modified by tool %q and restored from the config store",
+				"PROTECTED FILE VIOLATION: %s was modified by tool %q and restored to the trusted snapshot",
 				strings.Join(violated, ", "), tc.Function.Name)
 			if rec.Error == "" {
 				rec.Error = violation
@@ -168,6 +201,14 @@ func (a *Agent) execTool(ctx context.Context, tc model.ToolCall) decision.ToolRe
 			}
 			result = "tool output discarded.\n" + violation
 			err = fmt.Errorf("%s", violation)
+		}
+		if len(failed) > 0 {
+			// Restore failed: the config state cannot be trusted any
+			// more this turn; abort the whole run.
+			rec.Error = "guard restore failed: " + strings.Join(failed, "; ")
+			result = "FATAL: " + rec.Error
+			err = fmt.Errorf("%s", rec.Error)
+			a.fatalGuard = true
 		}
 	}
 

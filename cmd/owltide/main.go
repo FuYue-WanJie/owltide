@@ -15,6 +15,7 @@ import (
 	"github.com/FuYue-WanJie/owltide/core/config"
 	"github.com/FuYue-WanJie/owltide/core/decision"
 	"github.com/FuYue-WanJie/owltide/core/evolve"
+	"github.com/FuYue-WanJie/owltide/core/guard"
 	"github.com/FuYue-WanJie/owltide/core/model"
 	"github.com/FuYue-WanJie/owltide/core/platform"
 	"github.com/FuYue-WanJie/owltide/core/store"
@@ -158,6 +159,9 @@ func setup() (agent.Options, func(), error) {
 	// Dangerous actions (rm -rf, git push --force, locks.yaml writes)
 	// ask the human at the terminal; the model can never self-approve.
 	reg.SetConfirmer(confirmFromStdin)
+	// Transaction-level backstop: any tool mutating protected files
+	// (including run_shell tricks) gets rolled back and logged.
+	gd := &guard.Guard{Root: st.Dir, St: st}
 	sessionID := time.Now().UTC().Format("20060102-150405")
 	known := map[string]bool{}
 	for _, d := range reg.Definitions() {
@@ -191,6 +195,7 @@ func setup() (agent.Options, func(), error) {
 		Decisions: dl,
 		SessionID: sessionID,
 		WorkDir:   workDir,
+		Guard:     gd,
 	}, cleanup, nil
 }
 

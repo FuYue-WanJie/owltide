@@ -11,6 +11,7 @@ import (
 
 	"github.com/FuYue-WanJie/owltide/core/config"
 	"github.com/FuYue-WanJie/owltide/core/decision"
+	"github.com/FuYue-WanJie/owltide/core/guard"
 	"github.com/FuYue-WanJie/owltide/core/model"
 	"github.com/FuYue-WanJie/owltide/core/tool"
 )
@@ -25,6 +26,9 @@ type Options struct {
 	WorkDir   string
 	// OnDelta streams assistant text to the UI; optional.
 	OnDelta func(text string)
+	// Guard enforces protected-file integrity across tool calls; nil
+	// disables the check (tests).
+	Guard *guard.Guard
 }
 
 // Agent runs the loop.
@@ -134,14 +138,39 @@ func (a *Agent) step(ctx context.Context) (model.Message, model.Usage, error) {
 }
 
 // execTool runs one tool call and appends the tool result message.
+// Protected files are hash-checked before/after: any tool (including
+// run_shell) that mutates them gets its result replaced by a violation
+// error and the files are restored from the config store.
 func (a *Agent) execTool(ctx context.Context, tc model.ToolCall) decision.ToolRecord {
 	rec := decision.ToolRecord{Name: tc.Function.Name}
 	start := time.Now()
+
+	var before guard.Snapshot
+	if a.opts.Guard != nil {
+		if snap, err := a.opts.Guard.Snapshot(); err == nil {
+			before = snap
+		}
+	}
 
 	result, err := "tool not found", fmt.Errorf("tool %q not found", tc.Function.Name)
 	if t, ok := a.opts.Tools.Get(tc.Function.Name); ok {
 		result, err = t.Call(ctx, json.RawMessage(tc.Function.Arguments))
 	}
+
+	if a.opts.Guard != nil && before != nil {
+		if violated, verr := a.opts.Guard.Verify(before); verr == nil && len(violated) > 0 {
+			violation := fmt.Sprintf(
+				"PROTECTED FILE VIOLATION: %s was modified by tool %q and restored from the config store",
+				strings.Join(violated, ", "), tc.Function.Name)
+			if rec.Error == "" {
+				rec.Error = violation
+				rec.OK = false
+			}
+			result = "tool output discarded.\n" + violation
+			err = fmt.Errorf("%s", violation)
+		}
+	}
+
 	rec.DurationMS = time.Since(start).Milliseconds()
 	if err != nil {
 		rec.Error = err.Error()

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -13,6 +14,8 @@ import (
 
 	"github.com/FuYue-WanJie/owltide/core/config"
 	"github.com/FuYue-WanJie/owltide/core/decision"
+	"github.com/FuYue-WanJie/owltide/core/guard"
+	"github.com/FuYue-WanJie/owltide/core/store"
 	"github.com/FuYue-WanJie/owltide/core/model"
 	"github.com/FuYue-WanJie/owltide/core/tool"
 )
@@ -303,5 +306,89 @@ func TestDangerousCommandLogged(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("confirmation rejection not recorded in decision log")
+	}
+}
+
+// TestGuardRollsBackShellTampering: run_shell editing locks.yaml is
+// rolled back at the transaction layer and the violation is returned
+// to the model and logged.
+func TestGuardRollsBackShellTampering(t *testing.T) {
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		t.Skip("no /bin/sh")
+	}
+	root := t.TempDir()
+	cfgDir := filepath.Join(root, ".owltide")
+	for _, d := range []string{"", "logs", "agents"} {
+		os.MkdirAll(filepath.Join(cfgDir, d), 0o755)
+	}
+	os.WriteFile(filepath.Join(cfgDir, "config.yaml"), []byte("model:\n  name: m\n  base_url: https://x\n"), 0o600)
+	os.WriteFile(filepath.Join(cfgDir, "locks.yaml"), []byte("locked:\n    - agent:reviewer\n"), 0o600)
+	st, err := store.Open(cfgDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.EnsureInit(); err != nil {
+		t.Fatal(err)
+	}
+	gd := &guard.Guard{Root: cfgDir, St: st}
+
+	srv := fakeLLM(t, 2, func(n int, req model.Request) string {
+		last := req.Messages[len(req.Messages)-1]
+		if last.Role == "user" && n > 1 {
+			b, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{
+				"delta": map[string]any{"content": "got it"},
+			}}})
+			return chunk(string(b)) + sseDone()
+		}
+		cmd := fmt.Sprintf("echo 'locked: []' > %s/locks.yaml", cfgDir)
+		args, _ := json.Marshal(map[string]string{"command": cmd})
+		tc := map[string]any{
+			"id": "call-t", "type": "function",
+			"function": map[string]string{"name": "run_shell", "arguments": string(args)},
+		}
+		b, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{
+			"delta": map[string]any{"tool_calls": []any{tc}},
+		}}})
+		return chunk(string(b)) + sseDone()
+	})
+
+	dtmp := t.TempDir()
+	dl, err := decision.Open(dtmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dl.Close()
+
+	cfg := config.Default()
+	reg := tool.NewRegistry()
+	must(reg.Register(tool.NewShell("/bin/sh", "-c", root, 5)))
+
+	opts := agentOptions(cfg, model.NewClient(srv.URL, "k", srv.Client()), reg, dl)
+	opts.Guard = gd
+	a := New(opts)
+	if _, err := a.Run(context.Background(), "clear the locks"); err != nil {
+		t.Fatal(err)
+	}
+
+	// locks.yaml must be restored.
+	data, err := os.ReadFile(filepath.Join(cfgDir, "locks.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "agent:reviewer") {
+		t.Fatalf("locks.yaml not restored: %q", data)
+	}
+
+	// Violation recorded in the decision log.
+	entries, _ := os.ReadDir(dtmp)
+	var found bool
+	for _, e := range entries {
+		b, _ := os.ReadFile(filepath.Join(dtmp, e.Name()))
+		if strings.Contains(string(b), "PROTECTED FILE VIOLATION") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("violation not recorded in decision log")
 	}
 }

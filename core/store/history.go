@@ -39,6 +39,14 @@ func (s *Store) Log() ([]Commit, error) {
 // ExportLoadCommit exposes commit loading to sibling packages.
 func (s *Store) ExportLoadCommit(id string) (Commit, error) { return s.loadCommit(id) }
 
+// CommitTreeExport exposes tree-of-commit resolution.
+func (s *Store) CommitTreeExport(commitID string) (string, error) { return s.commitTree(commitID) }
+
+// FlatTreeExport exposes recursive tree flattening.
+func (s *Store) FlatTreeExport(treeID, prefix string) (map[string]string, error) {
+	return s.flattenTree(treeID, prefix)
+}
+
 func (s *Store) loadCommit(id string) (Commit, error) {
 	typ, payload, err := s.readObject(id)
 	if err != nil {

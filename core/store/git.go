@@ -106,6 +106,9 @@ func (s *Store) writeObject(typ string, payload []byte) (string, error) {
 	return id, os.WriteFile(dst, buf.Bytes(), 0o444)
 }
 
+// ReadObjectExport exposes object reading to sibling packages.
+func (s *Store) ReadObjectExport(id string) (string, []byte, error) { return s.readObject(id) }
+
 // readObject loads an object: loose first, then pack files.
 func (s *Store) readObject(id string) (typ string, payload []byte, err error) {
 	typ, payload, lerr := s.readLoose(id)

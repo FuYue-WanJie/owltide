@@ -18,6 +18,7 @@ import (
 	"github.com/FuYue-WanJie/owltide/core/guard"
 	"github.com/FuYue-WanJie/owltide/core/model"
 	"github.com/FuYue-WanJie/owltide/core/platform"
+	"github.com/FuYue-WanJie/owltide/core/spill"
 	"github.com/FuYue-WanJie/owltide/core/store"
 	"github.com/FuYue-WanJie/owltide/core/tool"
 )
@@ -159,10 +160,18 @@ func setup() (agent.Options, func(), error) {
 	// Dangerous actions (rm -rf, git push --force, locks.yaml writes)
 	// ask the human at the terminal; the model can never self-approve.
 	reg.SetConfirmer(confirmFromStdin)
+	sessionID := time.Now().UTC().Format("20060102-150405")
 	// Transaction-level backstop: any tool mutating protected files
 	// (including run_shell tricks) gets rolled back and logged.
 	gd := &guard.Guard{Root: st.Dir, St: st}
-	sessionID := time.Now().UTC().Format("20060102-150405")
+
+	// Inline & spill: oversized tool outputs go to disk, not context.
+	sp, err := spill.New(st.Dir, sessionID, 0)
+	if err != nil {
+		return agent.Options{}, nil, err
+	}
+	tool.SetSpillReader(func(ref string) (string, error) { return sp.Read(ref) })
+	_ = spill.CleanupSession(st.Dir, sessionID)
 	known := map[string]bool{}
 	for _, d := range reg.Definitions() {
 		known[d.Function.Name] = true
@@ -196,6 +205,7 @@ func setup() (agent.Options, func(), error) {
 		SessionID: sessionID,
 		WorkDir:   workDir,
 		Guard:     gd,
+		Spill:     sp,
 	}, cleanup, nil
 }
 

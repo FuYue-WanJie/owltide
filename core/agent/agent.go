@@ -15,6 +15,7 @@ import (
 	"github.com/FuYue-WanJie/owltide/core/config"
 	"github.com/FuYue-WanJie/owltide/core/decision"
 	"github.com/FuYue-WanJie/owltide/core/guard"
+	"github.com/FuYue-WanJie/owltide/core/spill"
 	"github.com/FuYue-WanJie/owltide/core/model"
 	"github.com/FuYue-WanJie/owltide/core/tool"
 )
@@ -32,6 +33,9 @@ type Options struct {
 	// Guard enforces protected-file integrity across tool calls; nil
 	// disables the check (tests).
 	Guard *guard.Guard
+	// Spill moves oversized tool results out of the context; nil keeps
+	// everything inline.
+	Spill *spill.Store
 }
 
 // Agent runs the loop.
@@ -254,6 +258,13 @@ func (a *Agent) execTool(ctx context.Context, tc model.ToolCall) decision.ToolRe
 	}
 	if strings.TrimSpace(result) == "" {
 		result = "(empty output)"
+	}
+	// Inline & spill: oversize results leave the context; errors keep
+	// their tail (failures live at the end).
+	if a.opts.Spill != nil {
+		if inlined, serr := a.opts.Spill.Result(result); serr == nil {
+			result = inlined
+		}
 	}
 
 	a.messages = append(a.messages, model.Message{

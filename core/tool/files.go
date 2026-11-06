@@ -73,7 +73,8 @@ func (ReadFile) Schema() Definition {
 			Name: "read_file",
 			Description: "Read a text file. Returns the content followed by a final " +
 				"\n[sha256:<hex>] marker line. Pass that hash as expect_sha256 when " +
-				"calling edit_file on this path.",
+				"calling edit_file on this path. Also serves truncated tool outputs: " +
+				"path spill:<id> or spill:<id>:100-200 (1-based lines).",
 			Parameters: object(`"path":{"type":"string"}`, "path"),
 		},
 	}
@@ -87,12 +88,25 @@ func (ReadFile) Call(_ context.Context, args json.RawMessage) (string, error) {
 	if err := a.validate(); err != nil {
 		return "", err
 	}
+	// spill:<id>[:start-end] serves saved oversized tool outputs.
+	if strings.HasPrefix(a.Path, "spill:") {
+		if spillReader == nil {
+			return "", fmt.Errorf("no spill store configured")
+		}
+		return spillReader(a.Path[len("spill:"):])
+	}
 	data, err := os.ReadFile(a.Path)
 	if err != nil {
 		return "", err
 	}
 	return clamp(string(data)) + "\n[sha256:" + sha256Hex(string(data)) + "]", nil
 }
+
+// spillReader is wired by the agent setup to the session spill store.
+var spillReader func(ref string) (string, error)
+
+// SetSpillReader registers the spill lookup used by read_file.
+func SetSpillReader(fn func(ref string) (string, error)) { spillReader = fn }
 
 // ---- write_file ----
 

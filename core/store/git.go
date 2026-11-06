@@ -156,7 +156,7 @@ func (s *Store) writeTree(rel string) (string, []treeEntry, error) {
 	}
 	var out []treeEntry
 	for _, e := range entries {
-		if e.Name() == ".git" || (rel == "." && (e.Name() == stashDir || e.Name() == "logs")) {
+		if e.Name() == ".git" || (rel == "." && (e.Name() == stashDir || e.Name() == "logs" || e.Name() == "spill")) {
 			continue
 		}
 		rp := filepath.ToSlash(filepath.Join(rel, e.Name()))

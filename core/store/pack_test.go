@@ -93,3 +93,48 @@ func TestFullGitCompatCycle(t *testing.T) {
 		t.Fatalf("log after second gc: %v", err)
 	}
 }
+
+func TestLogsDirNeverCommitted(t *testing.T) {
+	s := newTestStore(t)
+	s.EnsureInit()
+	write(t, s.Dir, "logs/decisions.jsonl", `{"secret":1}`)
+	write(t, s.Dir, "memory/note.md", "# n")
+	if _, _, err := s.AutoCommit(CommitMeta{Who: "agent", Reason: "x"}); err != nil {
+		t.Fatal(err)
+	}
+	log, _ := s.Log()
+	for _, f := range log[0].Changed {
+		if strings.HasPrefix(f, "logs/") || f == "logs" {
+			t.Fatalf("logs/ must never be committed, got %v", log[0].Changed)
+		}
+	}
+	if !strings.HasPrefix(strings.Join(log[0].Changed, ","), "memory/note.md") {
+		t.Fatalf("memory change missing: %v", log[0].Changed)
+	}
+}
+
+func TestGitStatusCleanAfterCommit(t *testing.T) {
+	s := newTestStore(t)
+	s.EnsureInit()
+	write(t, s.Dir, "agents/a.yaml", "name: a\n")
+	if _, _, err := s.AutoCommit(CommitMeta{Who: "agent", Reason: "x"}); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("git", "status", "--porcelain")
+	cmd.Dir = s.Dir
+	cmd.Env = append(os.Environ(), "GIT_DIR="+s.GitDir, "GIT_WORK_TREE="+s.Dir)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git status: %v: %s", err, out)
+	}
+	if strings.TrimSpace(string(out)) != "" {
+		t.Fatalf("git status not clean:\n%s", out)
+	}
+	// fsck must also stay healthy with our index in place.
+	fsck := exec.Command("git", "fsck")
+	fsck.Dir = s.Dir
+	fsck.Env = cmd.Env
+	if o, err := fsck.CombinedOutput(); err != nil {
+		t.Fatalf("git fsck: %v: %s", err, o)
+	}
+}

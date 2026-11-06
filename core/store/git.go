@@ -40,6 +40,8 @@ func Open(dir string) (*Store, error) {
 			return nil, err
 		}
 	}
+	// Repair a missing index after external git operations (e.g. gc).
+	_ = s.writeIndex()
 	return s, nil
 }
 
@@ -151,7 +153,7 @@ func (s *Store) writeTree(rel string) (string, []treeEntry, error) {
 	}
 	var out []treeEntry
 	for _, e := range entries {
-		if e.Name() == ".git" || (rel == "." && e.Name() == stashDir) {
+		if e.Name() == ".git" || (rel == "." && (e.Name() == stashDir || e.Name() == "logs")) {
 			continue
 		}
 		rp := filepath.ToSlash(filepath.Join(rel, e.Name()))
@@ -256,6 +258,8 @@ func (s *Store) commit(treeID, parent, msg string) (string, map[string]bool, err
 	// A loose ref shadows packed-refs, but git gc may have packed it:
 	// strip the stale packed entry to avoid ambiguity.
 	s.removePackedRef("refs/heads/main")
+	// Keep .git/index in sync so real git status stays clean.
+	_ = s.writeIndex()
 	return id, changed, nil
 }
 

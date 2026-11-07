@@ -59,7 +59,7 @@ func (t *TaskSpec) UnmarshalJSON(b []byte) error {
 	}
 	if strings.TrimSpace(obj.Task) == "" {
 		return fmt.Errorf(
-			`tasks[] object element needs a non-empty "task", `+
+			`tasks[] object element needs a non-empty "task", ` +
 				`e.g. "tasks": [{"role":"explore","task":"..."}]`)
 	}
 	t.Role = obj.Role
@@ -143,7 +143,7 @@ func (t agentStart) Call(ctx context.Context, args json.RawMessage) (string, err
 		}
 		if hasShared && strings.TrimSpace(a.Role) == "" {
 			return "", fmt.Errorf(
-				`parallel mode requires role when tasks[] contains plain strings; `+
+				`parallel mode requires role when tasks[] contains plain strings; ` +
 					`expected shape: {"role":"explore","mode":"parallel","tasks":["plain task",{"role":"explore","task":"other"}]}`)
 		}
 		return t.startParallel(ctx, a)

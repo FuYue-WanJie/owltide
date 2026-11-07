@@ -138,3 +138,5 @@ cmd/owltide/  CLI 入口（chat 交互 / run 一次性）
   - 整改 `6a9efe3`：测试夹具换假 key（sk-TESTKEY…，断言同步）；新规矩：任何提交/测试/日志/汇报不得出现真实密钥，测试一律伪造值
   - 门禁：scripts/secretscan（sh，规则=sk- 系/常见令牌前缀/PEM/Bearer/高熵(≥32 字符，hex 4.0 上限不误伤、含 / 的路径形 4.5、其余 4.1)/本地配置 key 的 sha256 比对（只存哈希：env 实时算 + scripts/secretscan.hashes 钉住已撤销旧 key））；scripts/hooks/pre-push + core.hooksPath（hook 从 $0 解析扫描器位置，跨 clone 可用）；已撤销 key 只出现在 diff 删除行时放行（修复提交不拦），出现于 + 行即拦
   - 测试 scripts/secretscan_test.go：假 key 提交被拦（TestSecretScanBlocksFakeKeyCommit，key 运行时拼接、源码无触发字面量）、正常内容不误报（TestSecretScanCleanTreePasses：模块路径/SHA/spill id）、高熵被拦（TestSecretScanBlocksHighEntropy）、钉住哈希连 TEST 标记也拦（TestSecretScanHashRulePinned）、端到端 pre-push（TestPrePushHookEndToEnd：bare origin + clone，干净推送成功、密钥推送被拒且远端未收到）
+
+- [2026-11-07] 密钥门禁验收通过（本地 hook + CI before..after + 金丝雀）。演进链：56ea135（secretscan + pre-push hook + 钉住哈希）→ 9163934（WORKLOG 整改记录）→ f238a30（CI 接入 + 显式 allowlist + key 形态哈希比对）→ 6a84ca9（输出脱敏为规则号+哈希前 12 位+位置；只扫远端没有的提交）→ 97a2529（CI 改扫 before..after 非空区间 + 金丝雀步骤 + 空区间告警；README 快速开始更新）。Actions run 42334615063（97a2529）：scan 步骤非空区间 clean，金丝雀步骤按预期 BLOCK（钉住哈希命中），输出无任何密钥内容。旧密钥已由使用者作废重签；仓库历史中的旧泄漏点由钉住哈希永久看护，任何新提交重新引入都会被拦。

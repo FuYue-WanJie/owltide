@@ -850,3 +850,43 @@ func TestAskUserDanglingAfterCrash(t *testing.T) {
 		t.Fatalf("unanswered marker missing from log")
 	}
 }
+
+// TestRouterModeExecutorRefusal: in router mode the executor layer
+// refuses tools outside the allowlist even when the registry still
+// carries them (defense in depth), reports via the audit sink, and the
+// refusal text tells the model to delegate. Standard mode is unchanged.
+func TestRouterModeExecutorRefusal(t *testing.T) {
+	var violations []string
+	reg := tool.NewRegistry()
+	must(reg.Register(&tool.WriteFile{}))
+
+	cfg := config.Default()
+	cfg.Model.BaseURL = "https://x"
+	cfg.Mode = "router"
+	srv := fakeLLM(t, 2, func(k int, req model.Request) string {
+		if k == 1 {
+			return toolCallJSON("r1", "write_file", `{"path":"x.txt","content":"no"}`)
+		}
+		return textChunk("done")
+	})
+	opts := agentOptions(cfg, model.NewClient(srv.URL, "k", nil), reg, nil)
+	opts.RouterMode = true
+	opts.AllowedTools = []string{"agent_start", "agent_status", "agent_result", "agent_send", "todo", "ask_user"}
+	opts.OnRouterViolation = func(name string) { violations = append(violations, name) }
+	a := New(opts)
+	_, err := a.Run(context.Background(), "write the file")
+	must(err)
+	if len(violations) != 1 || violations[0] != "write_file" {
+		t.Fatalf("violation audit missing: %v", violations)
+	}
+	// The refusal text reached the model as the tool result.
+	msgs, _, err := sessionlog.RebuildWithWarning(filepath.Join(t.TempDir(), "none"))
+	_ = msgs
+	_ = err
+	for _, m := range a.messages {
+		if m.Role == model.RoleTool && strings.Contains(m.Content, "router 模式下请委派子代理") {
+			return
+		}
+	}
+	t.Fatalf("refusal text missing from messages")
+}

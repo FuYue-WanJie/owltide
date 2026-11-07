@@ -1472,3 +1472,60 @@ func TestLoopStopReleasesSubagentReservation(t *testing.T) {
 		t.Fatal("write token must be with main after loop stop")
 	}
 }
+
+// TestRouterSingleWriter: in router mode a second writing sub-agent is
+// refused while one is running (error, not queued); read-only roles
+// are unaffected; outside router mode the refusal does not apply.
+func TestRouterSingleWriter(t *testing.T) {
+	f := newFixture(t, nil, fxOpts{})
+	f.m.opts.RouterMode = true
+
+	def := f.agents["general"] // writer role
+	// Inject a running writer session.
+	writer := &Session{
+		ID: "sub-w1", Role: "general", Def: def,
+		Task: "t", Mode: ModeSingle, State: StateRunning,
+	}
+	f.m.mu.Lock()
+	f.m.sessions[writer.ID] = writer
+	f.m.mu.Unlock()
+
+	st := f.m.ManagerTools()[0].(interface {
+		Call(context.Context, json.RawMessage) (string, error)
+	})
+	// Second write task: refused with guidance.
+	_, err := st.Call(context.Background(), json.RawMessage(
+		`{"role":"general","task":"also write","mode":"single"}`))
+	if err == nil || !strings.Contains(err.Error(), "单写者限制") {
+		t.Fatalf("second writer must be refused with the single-writer notice: %v", err)
+	}
+	// Read-only role unaffected.
+	if _, err := st.Call(context.Background(), json.RawMessage(
+		`{"role":"explore","task":"read stuff","mode":"single"}`)); err != nil {
+		t.Fatalf("read-only role must pass: %v", err)
+	}
+	// After the writer finishes, the next write task passes.
+	f.m.mu.Lock()
+	writer.State = StateDone
+	f.m.mu.Unlock()
+	if _, err := st.Call(context.Background(), json.RawMessage(
+		`{"role":"general","task":"now write","mode":"single"}`)); err != nil {
+		t.Fatalf("writer after completion must pass: %v", err)
+	}
+
+	// Outside router mode: concurrent writers are not refused.
+	f2 := newFixture(t, nil, fxOpts{})
+	f2.m.mu.Lock()
+	f2.m.sessions["sub-w2"] = &Session{
+		ID: "sub-w2", Role: "general", Def: f2.agents["general"],
+		Task: "t", Mode: ModeSingle, State: StateRunning,
+	}
+	f2.m.mu.Unlock()
+	st2 := f2.m.ManagerTools()[0].(interface {
+		Call(context.Context, json.RawMessage) (string, error)
+	})
+	if _, err := st2.Call(context.Background(), json.RawMessage(
+		`{"role":"general","task":"also write","mode":"single"}`)); err != nil {
+		t.Fatalf("non-router mode must not refuse: %v", err)
+	}
+}

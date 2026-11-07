@@ -32,9 +32,10 @@ const usage = `OwlTide - a personal agent.
 
 Usage:
   owltide init            write an example config to ~/.owltide/config.yaml
-  owltide chat [--resume <session-id>]
-                          interactive multi-turn session (optionally resumed)
-  owltide run [--resume <session-id>] "task"
+  owltide chat [--resume <session-id>] [--router]
+                          interactive multi-turn session (optionally resumed;
+                          --router delegates everything to sub-agents)
+  owltide run [--resume <session-id>] [--router] "task"
                           run one task and exit (optionally resumed)
   owltide sessions        list saved sessions (ids for --resume)
   owltide lock <id>       protect a config item (user only)
@@ -55,17 +56,17 @@ func main() {
 	case "sessions":
 		listSessions()
 	case "chat":
-		resumeID, _, err := parseResumeFlag(os.Args[2:])
+		resumeID, flags, _, err := parseFlags(os.Args[2:])
 		must(err)
-		runChat(resumeID)
+		runChat(resumeID, flags["router"])
 	case "run":
-		resumeID, args, err := parseResumeFlag(os.Args[2:])
+		resumeID, flags, rest, err := parseFlags(os.Args[2:])
 		must(err)
-		if len(args) < 1 {
-			fmt.Println(`usage: owltide run [--resume <session-id>] "task"`)
+		if len(rest) < 1 {
+			fmt.Println(`usage: owltide run [--resume <session-id>] [--router] "task"`)
 			os.Exit(2)
 		}
-		runOneShot(resumeID, strings.Join(args, " "))
+		runOneShot(resumeID, flags["router"], strings.Join(rest, " "))
 	case "lock", "unlock":
 		if len(os.Args) < 3 {
 			fmt.Printf("usage: owltide %s <id>\n", os.Args[1])
@@ -95,39 +96,43 @@ func sessionsDir() string {
 // stays filesystem-safe).
 var resumeRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
-// parseResumeFlag extracts --resume <id> / --resume=<id> from args and
-// returns the id (validated; error on traversal-shaped values) and the
-// remaining arguments.
-func parseResumeFlag(args []string) (string, []string, error) {
+// parseFlags extracts --resume <id> / --resume=<id> and boolean flags
+// (--router) from args; returns the validated session id, the flag
+// set, and the remaining arguments.
+func parseFlags(args []string) (string, map[string]bool, []string, error) {
+	flags := map[string]bool{}
 	var id string
-	sawResume := false
 	var rest []string
-	for i := 0; i < len(args); i++ {
+	i := 0
+	for ; i < len(args); i++ {
 		a := args[i]
-		switch {
-		case a == "--resume":
-			if i+1 >= len(args) {
-				return "", nil, fmt.Errorf("--resume requires a session id (see: owltide sessions)")
+		if a == "--router" {
+			flags["router"] = true
+			continue
+		}
+		if a == "--resume" || strings.HasPrefix(a, "--resume=") {
+			if a == "--resume" {
+				if i+1 >= len(args) {
+					return "", nil, nil, fmt.Errorf("--resume requires a session id (see: owltide sessions)")
+				}
+				i++
+				id = args[i]
+			} else {
+				id = strings.TrimPrefix(a, "--resume=")
 			}
-			id = args[i+1]
-			sawResume = true
-			i++
-		case strings.HasPrefix(a, "--resume="):
-			id = strings.TrimPrefix(a, "--resume=")
-			sawResume = true
-		default:
-			rest = append(rest, a)
+			if id == "" {
+				return "", nil, nil, fmt.Errorf("--resume requires a session id (see: owltide sessions)")
+			}
+			if !resumeRe.MatchString(id) {
+				return "", nil, nil, fmt.Errorf("invalid session id %q", id)
+			}
+			continue
 		}
+		// First non-flag argument starts the task text.
+		rest = append(rest, args[i:]...)
+		break
 	}
-	if sawResume {
-		if id == "" {
-			return "", nil, fmt.Errorf("--resume requires a session id (see: owltide sessions)")
-		}
-		if !resumeRe.MatchString(id) {
-			return "", nil, fmt.Errorf("invalid session id %q", id)
-		}
-	}
-	return id, rest, nil
+	return id, flags, rest, nil
 }
 
 // listSessions prints saved session ids with their message counts.
@@ -217,7 +222,7 @@ func must(err error) {
 }
 
 // setup builds everything an agent run needs.
-func setup(resumeID string) (agent.Options, func(), *subagent.Manager, error) {
+func setup(resumeID string, router bool) (agent.Options, func(), *subagent.Manager, error) {
 	cfg, err := config.Load()
 	if err != nil {
 		return agent.Options{}, nil, nil, err
@@ -246,6 +251,13 @@ func setup(resumeID string) (agent.Options, func(), *subagent.Manager, error) {
 			return agent.Options{}, nil, nil, err
 		}
 	}
+	// ask_user: interactive runs pause for the answer; one-shot runs
+	// (no terminal question) get the make-assumptions guidance. Only
+	// the main agent's registry carries it.
+	if router {
+		cfg.Mode = "router"
+	}
+	reg.Register(&agent.AskUserTool{Asker: askFromStdin})
 
 	// Self-evolution: layout + auto-commit store + evolution tools.
 	st, err := openStore()
@@ -330,6 +342,7 @@ func setup(resumeID string) (agent.Options, func(), *subagent.Manager, error) {
 		BaseReg: reg, Agents: roleDefs, Guard: gd, Spill: sp,
 		Decisions: dl, SessionID: sessionID, WorkDir: workDir,
 		TodoDir: sp.Dir, Loop: agent.LoopConfig{}, DecisionsOn: cfg.Logging.Decisions,
+		RouterMode:   cfg.Router(),
 		Confirm:      confirmFromStdin,
 		SessLog:      sessLog,
 		SubLogDir:    platform.ConfigDir(home) + "/logs/sub",
@@ -377,16 +390,25 @@ func setup(resumeID string) (agent.Options, func(), *subagent.Manager, error) {
 	}
 
 	return agent.Options{
-		Config:    cfg,
-		Client:    model.NewClient(cfg.Model.BaseURL, key, nil),
-		Tools:     reg,
-		Decisions: dl,
-		SessionID: sessionID,
-		WorkDir:   workDir,
-		Guard:     gd,
-		Spill:     sp,
-		TodoDir:   sp.Dir,
-		SessLog:   sessLog,
+		Config:     cfg,
+		Client:     model.NewClient(cfg.Model.BaseURL, key, nil),
+		Tools:      reg,
+		Decisions:  dl,
+		SessionID:  sessionID,
+		WorkDir:    workDir,
+		Guard:      gd,
+		Spill:      sp,
+		TodoDir:    sp.Dir,
+		SessLog:    sessLog,
+		RouterMode: cfg.Router(),
+		AllowedTools: []string{
+			"agent_start", "agent_status", "agent_result", "agent_send",
+			"todo", "ask_user",
+		},
+		OnRouterViolation: func(toolName string) {
+			subagent.AppendEvent(platform.ConfigDir(home)+"/logs", "router_violation",
+				map[string]any{"tool": toolName, "session": sessionID})
+		},
 	}, cleanup, mgr, nil
 }
 
@@ -402,8 +424,8 @@ func withSignal() (context.Context, func()) {
 	return ctx, func() { signal.Stop(ch); cancel() }
 }
 
-func runChat(resumeID string) {
-	opts, cleanup, mgr, err := setup(resumeID)
+func runChat(resumeID string, router bool) {
+	opts, cleanup, mgr, err := setup(resumeID, router)
 	must(err)
 	defer cleanup()
 	ctx, stop := withSignal()
@@ -437,8 +459,8 @@ func runChat(resumeID string) {
 	}
 }
 
-func runOneShot(resumeID, task string) {
-	opts, cleanup, mgr, err := setup(resumeID)
+func runOneShot(resumeID string, router bool, task string) {
+	opts, cleanup, mgr, err := setup(resumeID, router)
 	must(err)
 	defer cleanup()
 	ctx, stop := withSignal()
@@ -475,6 +497,32 @@ func restoreSession(a *agent.Agent, resumeID string) {
 	}
 	fmt.Printf("resumed session %s (%d messages, %d tool calls repaired)\n",
 		resumeID, len(msgs), n)
+}
+
+// askFromStdin asks the user an open question on the terminal (with
+// optional choices; free text always allowed).
+func askFromStdin(question string, choices []string) (string, error) {
+	fmt.Printf("\n%s\n", question)
+	if len(choices) > 0 {
+		for i, c := range choices {
+			fmt.Printf("  %d) %s\n", i+1, c)
+		}
+		fmt.Println("（输入选项序号或自由文本，回车提交）")
+	} else {
+		fmt.Print("> ")
+	}
+	sc := bufio.NewScanner(os.Stdin)
+	if !sc.Scan() {
+		return "", fmt.Errorf("no answer provided")
+	}
+	ans := strings.TrimSpace(sc.Text())
+	// Numeric choice maps back to the option text.
+	if n := 0; len(choices) > 0 {
+		if _, err := fmt.Sscanf(ans, "%d", &n); err == nil && n >= 1 && n <= len(choices) {
+			return choices[n-1], nil
+		}
+	}
+	return ans, nil
 }
 
 // confirmFromStdin asks the user a yes/no question on the terminal.

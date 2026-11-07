@@ -18,7 +18,7 @@ import (
 // (builtin_version). When the shipped prompts/tools change, bump it:
 // existing files whose hash still matches ANY earlier shipped version
 // are upgraded in place; files the user has edited are left alone.
-const builtinVersion = 2
+const builtinVersion = 3
 
 // shippedHashes maps role name -> set of sha256 hex digests of every
 // builtin-rendered version of that role file (current and past).
@@ -82,7 +82,10 @@ func init() {
 		Tools:  []string{"read_file", "list_dir", "todo"},
 		Budget: Budget{MaxTurns: 8, MaxTokens: 60000, ToolTimeoutSec: 30},
 	})
-	// v2: current definitions (explore focus guidance).
+	// v2: explore focus guidance (the four original roles, current
+	// content).
+	// v3: adds the worker role; the four v2 roles are unchanged in
+	// content, only the version header moves.
 	for _, d := range BuiltinRoles() {
 		registerShipped(d)
 	}
@@ -127,6 +130,17 @@ func BuiltinRoles() []Def {
 				"questions:\n- <what you could not verify>",
 			Tools:  []string{"read_file", "list_dir", "run_shell"},
 			Budget: Budget{MaxTurns: 10, MaxTokens: 100000, ToolTimeoutSec: 30},
+		},
+		{
+			Name:        "worker",
+			Description: "Read-write executor for router mode: runs shell commands and edits files under the same guard as the main agent. Not parallelizable (single writer).",
+			Model:       "inherit",
+			SystemPrompt: "You are the OwlTide worker. Execute the task end to end with the " +
+				"tools provided; run shell commands and edit files only as the task requires. " +
+				"Work inside the path the task gives you. Finish with a short factual " +
+				"summary of what you changed and how you verified it.",
+			Tools:  []string{"read_file", "write_file", "edit_file", "list_dir", "run_shell", "todo"},
+			Budget: Budget{MaxTurns: 15, MaxTokens: 150000, ToolTimeoutSec: 60},
 		},
 		{
 			Name:        "planner",

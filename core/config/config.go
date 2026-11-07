@@ -35,10 +35,15 @@ type Config struct {
 	Model   Model  `yaml:"model"`
 	System  string `yaml:"system_prompt"`
 	Budget  Budget `yaml:"budget"`
+	Mode    string `yaml:"mode"` // "": standard; "router": delegate-only
 	Logging struct {
 		Decisions bool `yaml:"decisions"`
 	} `yaml:"logging"`
 }
+
+// Router reports whether router mode is on (config mode: router or the
+// CLI --router flag).
+func (c Config) Router() bool { return c.Mode == "router" }
 
 // Default returns the built-in defaults used when the file is absent
 // or a field is missing.

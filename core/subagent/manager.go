@@ -111,6 +111,13 @@ type ManagerOpts struct {
 	// main conversation happens through Parent (SetParent) + SessLog
 	// regardless.
 	OnResult func(id, role, summary string)
+
+	// RouterMode enforces delegate-only discipline: at most ONE
+	// non-readonly (writing) sub-agent may be running at a time;
+	// additional write tasks are refused until it finishes (error, not
+	// queueing - the model decides whether to stop the current worker
+	// first or collect its result). Read-only roles are unaffected.
+	RouterMode bool
 }
 
 // Session is one sub-agent instance.
@@ -204,6 +211,19 @@ func (m *Manager) SetParent(p *agent.Agent) {
 	p.SetOnRunEnd(m.StopAll)
 	m.recoverFinished()
 	m.reDeliverPending()
+}
+
+// writeBusy reports whether a non-readonly (writing) sub-agent is
+// currently running or queued (router mode's single-writer rule).
+func (m *Manager) writeBusy() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, s := range m.sessions {
+		if (s.State == StateRunning || s.State == StateQueued) && !s.Def.Readonly {
+			return true
+		}
+	}
+	return false
 }
 
 // StopAll cancels every running or queued sub-agent, returns the write

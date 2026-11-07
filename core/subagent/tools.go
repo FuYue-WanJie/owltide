@@ -183,6 +183,13 @@ func (t agentStart) startSingle(ctx context.Context, a startArgs) (string, error
 	if err != nil {
 		return "", err
 	}
+	// Router discipline: one writer at a time. A second write task is
+	// refused (not queued) until the current one finishes or is
+	// stopped; read-only roles are never blocked.
+	if m.opts.RouterMode && !def.Readonly && m.writeBusy() {
+		return "", fmt.Errorf(
+			"router 模式下单写者限制：已有一个写入型子代理在运行（先 agent_result 收结果或 agent_stop 停止它，再派新的写入任务）")
+	}
 	reg, err := m.BuildRegistry(def)
 	if err != nil {
 		return "", err

@@ -53,12 +53,35 @@ type Options struct {
 	// do not call it. The sub-agent manager uses it to stop running
 	// sub-agents and release their reservations.
 	OnRunEnd func(reason string)
+	// RouterMode turns on delegate-only enforcement: tool calls for
+	// anything outside AllowedTools are refused by the executor (and
+	// reported through OnRouterViolation when set) even if the model
+	// hard-calls them. Registry-level filtering hides the tools; this
+	// is the second layer.
+	RouterMode    bool
+	AllowedTools  []string
+	// OnRouterViolation is the audit sink for executor-level refusals.
+	OnRouterViolation func(tool string)
 }
 
 // SetOnRunEnd wires the abort hook after construction (the sub-agent
 // manager is built after the parent agent).
 func (a *Agent) SetOnRunEnd(fn func(reason string)) {
 	a.opts.OnRunEnd = fn
+}
+
+// routerAllowed reports whether the named tool may be called in
+// router mode (empty allowlist blocks everything).
+func (a *Agent) routerAllowed(name string) bool {
+	if !a.opts.RouterMode {
+		return true
+	}
+	for _, t := range a.opts.AllowedTools {
+		if t == name {
+			return true
+		}
+	}
+	return false
 }
 
 // logMsg appends one message to the in-memory history and, when
@@ -459,6 +482,22 @@ func (a *Agent) execTool(ctx context.Context, tc model.ToolCall) decision.ToolRe
 		}
 		before = snap
 		a.lastSnap = snap
+	}
+
+	// Router mode: second enforcement layer. The registry already
+	// hides the tools; this catches hard-calls by name and refuses
+	// them with guidance, then reports through the audit sink.
+	if !a.routerAllowed(tc.Function.Name) {
+		rec := decision.ToolRecord{Name: tc.Function.Name, Error: "router mode refusal"}
+		a.logMsg(model.Message{
+			Role: model.RoleTool, Name: tc.Function.Name,
+			ToolCallID: tc.ID,
+			Content:    "router 模式下请委派子代理（agent_start），主代理不执行 " + tc.Function.Name,
+		})
+		if a.opts.OnRouterViolation != nil {
+			a.opts.OnRouterViolation(tc.Function.Name)
+		}
+		return rec
 	}
 
 	result, err := "tool not found", fmt.Errorf("tool %q not found", tc.Function.Name)

@@ -126,8 +126,8 @@ func TestSeedBuiltinsVersionUpgrade(t *testing.T) {
 	}
 	explorePath := filepath.Join(Dir(root), "explore.md")
 	data, _ := os.ReadFile(explorePath)
-	if !strings.Contains(string(data), "builtin_version: 2") {
-		t.Fatalf("fresh seed must stamp builtin_version: 2:\n%s", data)
+	if !strings.Contains(string(data), "builtin_version: 3") {
+		t.Fatalf("fresh seed must stamp builtin_version: 3:\n%s", data)
 	}
 
 	// 2. Untouched v1 file (hash matches a shipped older version):
@@ -181,5 +181,31 @@ func TestSeedBuiltinsVersionUpgrade(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("edited file must produce a note: %v", notes)
+	}
+}
+
+// TestWorkerBuiltinExists: router mode needs a writable role; worker is
+// seeded among the builtins with run_shell and editing tools.
+func TestWorkerBuiltinExists(t *testing.T) {
+	var worker *Def
+	for _, d := range BuiltinRoles() {
+		if d.Name == "worker" {
+			worker = &d
+		}
+	}
+	if worker == nil {
+		t.Fatal("worker role missing from builtins")
+	}
+	if worker.Readonly {
+		t.Fatal("worker must be writable")
+	}
+	has := map[string]bool{}
+	for _, tl := range worker.Tools {
+		has[tl] = true
+	}
+	for _, need := range []string{"run_shell", "edit_file", "write_file"} {
+		if !has[need] {
+			t.Fatalf("worker missing %q", need)
+		}
 	}
 }

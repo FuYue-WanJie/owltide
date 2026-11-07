@@ -99,7 +99,7 @@ func TestErrorTailAndScrub(t *testing.T) {
 	s, _ := newStore(t, 512)
 
 	noisy := strings.Repeat("progress...\n", 200) +
-		"ERROR: build failed at line 900\nkey=sk-VKZGTLYmYqzhAI3RojKsVgFKuyfsRIyblLMHOvDXXXLwTYRB\n"
+		"ERROR: build failed at line 900\nkey=sk-TESTKEY00000000000000000000000000000000000000\n"
 	out, err := s.Result("ERROR: " + noisy)
 	if err != nil {
 		t.Fatal(err)
@@ -110,14 +110,14 @@ func TestErrorTailAndScrub(t *testing.T) {
 	id := between(out, "[spill id: ", " —")
 	lines := strings.Count(Scrub(noisy), "\n") + 1
 	full, _ := s.Read(id + ":1-" + itoa(lines))
-	if strings.Contains(full, "sk-VKZGTLYmYqzh") {
+	if strings.Contains(full, "sk-TESTKEY000") {
 		t.Fatal("API key leaked into spill file")
 	}
-	if !strings.Contains(full, "sk-V") || !strings.Contains(full, "TYRB") || strings.Contains(full, "sk-VKZGTLYmYqzh") {
+	if !strings.Contains(full, "sk-T") || !strings.Contains(full, "0000") || strings.Contains(full, "sk-TESTKEY00000000") {
 		t.Fatalf("scrub did not run on spill content: %q", full[maxInt(0, len(full)-120):])
 	}
 	// Also: the excerpt in context must not carry the raw key.
-	if strings.Contains(out, "sk-VKZGTLYmYqzh") {
+	if strings.Contains(out, "sk-TESTKEY000") {
 		t.Fatal("key leaked into context excerpt")
 	}
 }

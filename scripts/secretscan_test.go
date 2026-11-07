@@ -7,6 +7,8 @@ package scripts_test
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"math/big"
 	"os"
 	"os/exec"
@@ -171,6 +173,49 @@ func TestSecretScanHashRulePinned(t *testing.T) {
 	}
 	if !strings.Contains(out, "rule 4") {
 		t.Fatalf("expected rule 4 hit, out=%s", out)
+	}
+}
+
+// TestSecretScanTestMarkerDoesNotExempt: a fake key placed next to a
+// TEST comment must STILL be blocked — no marker-based skips exist.
+func TestSecretScanTestMarkerDoesNotExempt(t *testing.T) {
+	dir := initRepo(t)
+	commitFile(t, dir, "base.txt", "base\n")
+	commitFile(t, dir, "clean.txt", "ok\n")
+	commitFile(t, dir, "looks_test.go",
+		"// TEST fixture: safe to commit\n"+
+			"const apiKey = \""+fakeSecret()+"\"\n")
+	out, code := scan(t, dir, "HEAD~1..HEAD")
+	if code == 0 {
+		t.Fatalf("TEST comment must not exempt the key, out=%s", out)
+	}
+	if !strings.Contains(out, "rule 1: known token prefix") {
+		t.Fatalf("expected rule 1 hit, out=%s", out)
+	}
+}
+
+// TestSecretScanAllowlistEntry: a value registered in
+// scripts/secretscan-allow (by sha256) passes the scan.
+func TestSecretScanAllowlistEntry(t *testing.T) {
+	dir := initRepo(t)
+	commitFile(t, dir, "base.txt", "base\n")
+	commitFile(t, dir, "clean.txt", "ok\n")
+	val := "AKIA" + "QQ2W3E4R5T6Y7U8I9O0"
+	sum := sha256.Sum256([]byte(val))
+	line := hex.EncodeToString(sum[:]) + " documented AWS example key"
+	allowPath := filepath.Join(filepath.Dir(scannerPath(t)), "secretscan-allow")
+	orig, err := os.ReadFile(allowPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(allowPath, append(orig, []byte("\n"+line+"\n")...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.WriteFile(allowPath, orig, 0o600) })
+	commitFile(t, dir, "allow.txt", "key = "+val+"\n")
+	out, code := scan(t, dir, "HEAD~1..HEAD")
+	if code != 0 {
+		t.Fatalf("allowlisted value must pass: exit=%d out=%s", code, out)
 	}
 }
 

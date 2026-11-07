@@ -59,23 +59,40 @@ func isDangerousCommand(cmd string) bool {
 			return true
 		}
 		if c, ok := node.(*syntax.CallExpr); ok {
-			words, evalErr := evalWords(c.Args)
-			// Any non-statically-evaluable word is dangerous.
-			if evalErr != nil {
+			ev := evalWords(c.Args)
+			if len(ev.words) == 0 {
+				return true
+			}
+			// Peel wrapper binaries first; note whether peeling saw
+			// dynamic words (the wrapped command may be dynamic).
+			rest, peeledDyn := peelWrappersEv(ev)
+			if len(rest.words) == 0 {
+				return true
+			}
+			// Rule 1: an unevaluable command NAME is dangerous.
+			if rest.dynami[0] {
 				danger = true
 				return false
 			}
-			if len(words) == 0 {
-				return true
+			name := rest.words[0]
+			// Rule 2: risky command + dynamic ARGUMENTS is dangerous.
+			if isRiskyCommand(name) && rest.dynamicArgs() {
+				danger = true
+				return false
 			}
-			// Peel wrapper binaries, then match the rule table.
-			rest, _ := peelWrappers(words)
-			if commandIsDangerous(rest) {
+			if _ = peeledDyn; isRiskyCommand(name) && peeledDyn {
+				danger = true
+				return false
+			}
+			// Rule 3: other commands may carry dynamic arguments —
+			// allowed; $(...) subcommands were already walked and
+			// checked by this very visitor.
+			if commandIsDangerous(rest.words) {
 				danger = true
 				return false
 			}
 			// sh -c 'script' / eval 'cmd': re-parse the body.
-			if body, ok := wrappedBody(rest); ok {
+			if body, ok := wrappedBody(rest.words); ok {
 				if isDangerousCommand(body) {
 					danger = true
 					return false
@@ -87,18 +104,64 @@ func isDangerousCommand(cmd string) bool {
 	return danger
 }
 
-// evalWords statically evaluates a word list. Returns an error when
-// any word contains runtime constructs we cannot resolve.
-func evalWords(args []*syntax.Word) ([]string, error) {
-	out := make([]string, 0, len(args))
-	for _, w := range args {
-		s, err := evalWord(w)
-		if err != nil {
-			return nil, err
+// evalResult carries a statically-evaluated word list plus which
+// positions could not be evaluated (dynamic words like $VAR, $(...)).
+type evalResult struct {
+	words  []string // evaluated text; dynamic positions hold ""
+	dynami []bool   // true where the word is not statically evaluable
+}
+
+// dynamic reports whether any word is unevaluable.
+func (e evalResult) dynamic() bool {
+	for _, d := range e.dynami {
+		if d {
+			return true
 		}
-		out = append(out, s)
 	}
-	return out, nil
+	return false
+}
+
+// dynamicArgs reports whether any word AFTER the command name is
+// unevaluable.
+func (e evalResult) dynamicArgs() bool {
+	for _, d := range e.dynami[minInt(1, len(e.dynami)):] {
+		if d {
+			return true
+		}
+	}
+	return false
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// slice drops the first n words.
+func (e evalResult) slice(n int) evalResult {
+	if n >= len(e.words) {
+		return evalResult{}
+	}
+	return evalResult{words: e.words[n:], dynami: e.dynami[n:]}
+}
+
+// evalWords statically evaluates a word list; unevaluable words are
+// marked, not fatal (see isDangerousCommand for the policy).
+func evalWords(args []*syntax.Word) evalResult {
+	res := evalResult{
+		words:  make([]string, len(args)),
+		dynami: make([]bool, len(args)),
+	}
+	for i, w := range args {
+		if s, err := evalWord(w); err == nil {
+			res.words[i] = s
+		} else {
+			res.dynami[i] = true
+		}
+	}
+	return res
 }
 
 // evalWord concatenates statically known parts of a word.
@@ -136,6 +199,110 @@ func wrapperWord(w string) bool {
 		return true
 	}
 	return false
+}
+
+// isRiskyCommand reports whether a command name carries enough
+// destructive potential that DYNAMIC arguments around it must be
+// treated as dangerous (we cannot see what they expand to).
+func isRiskyCommand(name string) bool {
+	base := filepath.Base(strings.TrimPrefix(name, "\\"))
+	switch base {
+	case "rm", "find", "git", "dd", "chmod", "chown", "mkfs",
+		"sh", "bash", "dash", "ash", "zsh", "ksh", "eval", "xargs",
+		"sudo", "doas", "nohup", "timeout", "env", "cp", "mv", "ln",
+		"truncate", "shred", "shutdown", "reboot", "poweroff", "halt",
+		"mount", "umount", "fdisk", "parted", "kill", "pkill", "killall",
+		"chattr", "setfacl", "tee":
+		return true
+	}
+	return strings.HasPrefix(base, "mkfs.")
+}
+
+// peelWrappersEv strips wrapper binaries and their own options from an
+// evaluated word list, returning the innermost command. Dynamic words
+// survive peeling and keep their flags.
+func peelWrappersEv(ev evalResult) (evalResult, bool) {
+	peeled := false
+	for len(ev.words) > 0 && ev.dynami[0] == false && wrapperWord(ev.words[0]) {
+		peeled = true
+		base := filepath.Base(ev.words[0])
+		ev = ev.slice(1)
+		// normalize struct literal
+		switch base {
+		case "env":
+			for len(ev.words) > 0 {
+				w, dyn := ev.words[0], ev.dynami[0]
+				if dyn {
+					break // cannot reason past a dynamic word
+				}
+				if w == "-i" || w == "--ignore-environment" {
+					ev = ev.slice(1)
+					continue
+				}
+				if w == "-u" && len(ev.words) > 1 {
+					ev = ev.slice(2)
+					continue
+				}
+				if strings.HasPrefix(w, "-") {
+					ev = ev.slice(1)
+					continue
+				}
+				if strings.Contains(w, "=") {
+					ev = ev.slice(1)
+					continue
+				}
+				break
+			}
+		case "timeout":
+			for len(ev.words) > 0 && !ev.dynami[0] && strings.HasPrefix(ev.words[0], "-") {
+				w := ev.words[0]
+				ev = ev.slice(1)
+				if (w == "-k" || w == "--kill-after") && len(ev.words) > 0 {
+					ev = ev.slice(1)
+				}
+			}
+			if len(ev.words) > 0 {
+				ev = ev.slice(1) // duration
+			}
+		case "nohup", "nice", "ionice", "stdbuf", "time", "command", "doas":
+			for len(ev.words) > 0 && !ev.dynami[0] && strings.HasPrefix(ev.words[0], "-") {
+				w := ev.words[0]
+				ev = ev.slice(1)
+				if w == "-n" && base == "nice" && len(ev.words) > 0 {
+					ev = ev.slice(1)
+				}
+			}
+		case "sudo":
+			for len(ev.words) > 0 {
+				w, dyn := ev.words[0], ev.dynami[0]
+				if dyn {
+					break
+				}
+				if w == "--" {
+					ev = ev.slice(1)
+					break
+				}
+				if !strings.HasPrefix(w, "-") {
+					break
+				}
+				ev = ev.slice(1)
+				if (w == "-u" || w == "-g" || w == "--user" || w == "--group") && len(ev.words) > 0 {
+					ev = ev.slice(1)
+				}
+			}
+		}
+	}
+	// busybox/toybox applet drop
+	if len(ev.words) > 0 && !ev.dynami[0] {
+		base := filepath.Base(ev.words[0])
+		if base == "busybox" || base == "toybox" {
+			if len(ev.words) > 1 {
+				ev = ev.slice(1)
+				peeled = true
+			}
+		}
+	}
+	return ev, peeled
 }
 
 // peelWrappers strips wrapper binaries and their own options from the

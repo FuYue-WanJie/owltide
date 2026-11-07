@@ -106,6 +106,13 @@ func TestDangerPatterns(t *testing.T) {
 		"git -C /repo clean -fdx",
 		// A4: delayed write via nohup
 		"nohup sh -c 'sleep 5; echo x > locks.yaml' &",
+		// risky command + dynamic args stays dangerous
+		"rm -rf $TARGET",
+		"rm $(find /)",
+		"find $DIR -delete",
+		"git push $REMOTE --force",
+		// dynamic redirect target is dangerous
+		"echo x > $F",
 	}
 	for _, c := range dangerous {
 		if !isDangerousCommand(c) {
@@ -120,6 +127,13 @@ func TestDangerPatterns(t *testing.T) {
 		"git commit -am 'force the issue'",
 		"go test ./...",
 		"git diff HEAD",
+		// dynamic args on non-risky commands are fine
+		"go test $(go list ./...)",
+		"cd \"$HOME\"",
+		"echo $PATH",
+		"ls $DIR",
+		"cat ${CONFIG_FILE}",
+		"echo $(date)",
 	}
 	for _, c := range safe {
 		if isDangerousCommand(c) {

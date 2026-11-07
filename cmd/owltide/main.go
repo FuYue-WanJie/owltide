@@ -471,6 +471,10 @@ func runOneShot(resumeID string, router bool, task string) {
 	restoreSession(a, resumeID)
 	mgr.SetParent(a)
 	_, err = a.Run(ctx, task)
+	// One-shot: the process exits now. Stop any still-running
+	// sub-agents so their reservations are released and the audit
+	// trail's reserved/released pairs stay balanced.
+	mgr.StopAll("oneshot_end")
 	fmt.Println()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)

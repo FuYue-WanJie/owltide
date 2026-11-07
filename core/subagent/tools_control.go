@@ -7,7 +7,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
+	"github.com/FuYue-WanJie/owltide/core/agent"
 	"github.com/FuYue-WanJie/owltide/core/tool"
 )
 
@@ -30,14 +32,24 @@ func (t agentStatus) Call(_ context.Context, args json.RawMessage) (string, erro
 	}
 	t.m.mu.Lock()
 	s, ok := t.m.sessions[a.ID]
+	state := ""
+	if ok {
+		state = s.State
+	}
 	t.m.mu.Unlock()
 	if !ok {
 		return "", fmt.Errorf("unknown sub-agent %q", a.ID)
 	}
-	b, _ := json.Marshal(map[string]string{
+	fields := map[string]string{
 		"id": s.ID, "role": s.Role, "state": s.State,
 		"started_at": s.Started.UTC().Format("2006-01-02T15:04:05Z"),
-	})
+	}
+	if state == StateRunning || state == StateQueued {
+		// Same-turn polling is the loop-detector trap: tell the model
+		// to end its turn instead of retrying.
+		fields["note"] = "仍在运行，结束本轮即可，结果会自动送达"
+	}
+	b, _ := json.Marshal(fields)
 	return string(b), nil
 }
 
@@ -143,30 +155,50 @@ func (t agentResult) Call(_ context.Context, args json.RawMessage) (string, erro
 	}
 	t.m.mu.Lock()
 	s, ok := t.m.sessions[a.ID]
+	// Same-turn inline delivery: this call becomes THE one delivery.
+	// The pair-based path (deliver) is skipped so the next turn does
+	// not inject a duplicate; the summary enters the main log as this
+	// call's tool result, which rebuilds correctly.
+	inline := false
+	if ok && s.State != StateRunning && s.State != StateQueued &&
+		!s.Delivered && !t.m.deliveredSeen[s.ID] {
+		if strings.TrimSpace(s.Summary) == "" && s.State != StateInterrupted {
+			s.Summary = agent.BudgetExhaustedSummary
+			if s.State == StateDone {
+				s.State = StateBudgetExhausted
+			}
+		}
+		s.Delivered = true
+		inline = true
+	}
 	t.m.mu.Unlock()
 	if !ok {
 		return "", fmt.Errorf("unknown sub-agent %q", a.ID)
 	}
 	if s.State == StateRunning || s.State == StateQueued {
-		b, _ := json.Marshal(map[string]string{"id": s.ID, "status": s.State})
-		return string(b), nil
-	}
-	// Delivered-once: after the first delivery the full summary lives
-	// in the main log; repeat calls get the reference only.
-	if s.Delivered {
 		b, _ := json.Marshal(map[string]string{
 			"id": s.ID, "status": s.State,
-			"note": "result already delivered to the main log; see the [subagent " + s.ID + " result] event there",
+			"note": "仍在运行，结束本轮即可，结果会自动送达",
 		})
 		return string(b), nil
 	}
-	// Not yet delivered (finished in the background): deliver now —
-	// the summary enters the main log once, and this call returns the
-	// summary inline as well.
-	t.m.deliver(s)
-	sum := t.m.foldLarge(s.Summary)
-	b, _ := json.Marshal(map[string]any{
-		"id": s.ID, "status": s.State, "summary": sum,
+	if inline {
+		t.m.event("delivered", map[string]any{
+			"id": s.ID, "role": s.Role, "summary_digest": digest(s.Summary),
+			"via": "agent_result",
+		})
+		sum := t.m.foldLarge(s.Summary)
+		b, _ := json.Marshal(map[string]any{
+			"id": s.ID, "status": s.State, "summary": sum,
+		})
+		return string(b), nil
+	}
+	// Delivered-once: after the first delivery the full summary lives
+	// in the main log; repeat calls get the reference only, and must
+	// stop polling.
+	b, _ := json.Marshal(map[string]string{
+		"id": s.ID, "status": s.State,
+		"note": "结果已在本会话前文的 agent_result 中，不要再查询",
 	})
 	return string(b), nil
 }

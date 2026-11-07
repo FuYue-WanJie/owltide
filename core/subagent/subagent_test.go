@@ -276,8 +276,8 @@ func TestResultDeliveredOnce(t *testing.T) {
 	if strings.Contains(out, "THE_SUMMARY_BODY") {
 		t.Fatalf("delivered result must not be re-sent: %s", out)
 	}
-	if !strings.Contains(out, "already delivered") {
-		t.Fatalf("expected reference-only reply: %s", out)
+	if !strings.Contains(out, "不要再查询") {
+		t.Fatalf("expected stop-polling reference reply: %s", out)
 	}
 }
 
@@ -1068,7 +1068,7 @@ func TestRunningSubagentReportedInterrupted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "already delivered") {
+	if !strings.Contains(out, "不要再查询") {
 		t.Fatalf("interrupted result must not be re-delivered: %s", out)
 	}
 	// Delivered event persisted.
@@ -1246,4 +1246,116 @@ func TestParallelTaskForms(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "read-only") {
 		t.Fatalf("non-readonly role must be refused with read-only hint: %v", err)
 	}
+}
+
+// TestSameTurnResultDelivery: while the sub-agent runs, agent_status
+// tells the model to end its turn; once finished, the FIRST agent_result
+// call returns the summary body and counts as the only delivery — no
+// message pair is injected afterwards, and repeat calls stop polling.
+func TestSameTurnResultDelivery(t *testing.T) {
+	srv := fakeLLM2(t, func(k int, req model.Request) string {
+		if k == 1 {
+			return textReply("SAME_TURN_BODY")
+		}
+		return textReply("should not be called again")
+	})
+	f := newFixture(t, nil, fxOpts{})
+	f.m.opts.Client = model.NewClient(srv.URL, "k", nil)
+
+	tools := f.m.ManagerTools()
+	statusT := tools[1].(interface {
+		Call(context.Context, json.RawMessage) (string, error)
+	})
+	resultT := tools[4].(interface {
+		Call(context.Context, json.RawMessage) (string, error)
+	})
+
+	// Inject a session that is still running.
+	s := &Session{
+		ID: "sub-sameturn1", Role: "explore",
+		Def: f.agents["explore"], Task: "t", Mode: ModeSingle,
+		State: StateRunning,
+	}
+	f.m.mu.Lock()
+	f.m.sessions[s.ID] = s
+	f.m.mu.Unlock()
+
+	// 1. status while running: hint to end the turn.
+	out, err := statusT.Call(context.Background(), json.RawMessage(`{"id":"sub-sameturn1"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "结束本轮即可") {
+		t.Fatalf("running status must carry the end-turn hint: %s", out)
+	}
+
+	// 2. The run finishes (watchdog path would deliver; simulate the
+	// completed state without the watchdog so agent_result wins).
+	f.m.mu.Lock()
+	s.State = StateDone
+	s.Summary = "SAME_TURN_BODY"
+	f.m.mu.Unlock()
+
+	// 3. First agent_result: the body, inline.
+	out, err = resultT.Call(context.Background(), json.RawMessage(`{"id":"sub-sameturn1"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "SAME_TURN_BODY") {
+		t.Fatalf("first result must return the body: %s", out)
+	}
+	// Exactly one delivered event, via agent_result.
+	delivs := 0
+	for l := range readLines(filepath.Join(f.cfgDir, "logs", "subagents.jsonl")) {
+		var e struct {
+			Event string `json:"event"`
+			ID    string `json:"id"`
+		}
+		if json.Unmarshal([]byte(l), &e) == nil && e.Event == "delivered" && e.ID == s.ID {
+			delivs++
+		}
+	}
+	if delivs != 1 {
+		t.Fatalf("expected exactly 1 delivered event, got %d", delivs)
+	}
+
+	// 4. Repeat call: stop-polling reference, no body.
+	out, err = resultT.Call(context.Background(), json.RawMessage(`{"id":"sub-sameturn1"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "SAME_TURN_BODY") || !strings.Contains(out, "不要再查询") {
+		t.Fatalf("repeat call must be a stop-polling reference: %s", out)
+	}
+
+	// 5. Next turn: no pair injected (log has no subnotice pair for it).
+	msgs, _, err := sessionlog.RebuildWithWarning(
+		filepath.Join(f.root, "sessions", "main", "messages.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range msgs {
+		if m.Role == "assistant" && len(m.ToolCalls) > 0 &&
+			strings.Contains(m.ToolCalls[0].ID, s.ID) {
+			t.Fatalf("no pair should be injected after inline delivery: %+v", m)
+		}
+	}
+}
+
+// readLines is a small helper over a text file.
+func readLines(path string) chan string {
+	ch := make(chan string)
+	go func() {
+		defer close(ch)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return
+		}
+		for _, l := range strings.Split(string(data), "\n") {
+			if l != "" {
+				ch <- l
+			}
+		}
+	}()
+	return ch
 }

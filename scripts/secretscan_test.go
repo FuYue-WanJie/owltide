@@ -219,6 +219,40 @@ func TestSecretScanAllowlistEntry(t *testing.T) {
 	}
 }
 
+// TestSecretScanOutputHasNoContent: when a fake key is blocked,
+// neither stdout nor stderr may contain any 6-char run of it.
+func TestSecretScanOutputHasNoContent(t *testing.T) {
+	dir := initRepo(t)
+	commitFile(t, dir, "base.txt", "base\n")
+	commitFile(t, dir, "clean.txt", "ok\n")
+	secret := fakeSecret()
+	commitFile(t, dir, "leak.txt", "token = "+secret+"\n")
+
+	cmd := exec.Command(scannerPath(t), "HEAD~1..HEAD")
+	cmd.Dir = dir
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err == nil {
+		t.Fatal("scan must fail on the fake key")
+	}
+	for _, stream := range []string{stdout.String(), stderr.String()} {
+		lower := strings.ToLower(stream)
+		for i := 0; i+6 <= len(secret); i++ {
+			frag := strings.ToLower(secret[i : i+6])
+			if strings.Contains(lower, frag) {
+				t.Fatalf("scanner output leaks key content: %q found", frag)
+			}
+		}
+	}
+	// Output must still identify the hit: rule, hash prefix, location.
+	joined := stdout.String() + stderr.String()
+	if !strings.Contains(joined, "BLOCK [rule 1") || !strings.Contains(joined, "sha256:") {
+		t.Fatalf("output lacks rule/hash identification: %s", joined)
+	}
+}
+
 // TestPrePushHookEndToEnd: a bare origin + clone with hooksPath set;
 // pushing a secret commit must fail, a clean push must succeed.
 func TestPrePushHookEndToEnd(t *testing.T) {

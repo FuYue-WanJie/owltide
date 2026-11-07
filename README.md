@@ -83,4 +83,4 @@ WORKLOG.md 工作日志（进展、决策、复盘）
 
 ## 许可证
 
-待定。
+[Apache-2.0](LICENSE)。

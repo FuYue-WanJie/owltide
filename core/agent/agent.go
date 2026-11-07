@@ -58,8 +58,8 @@ type Options struct {
 	// reported through OnRouterViolation when set) even if the model
 	// hard-calls them. Registry-level filtering hides the tools; this
 	// is the second layer.
-	RouterMode    bool
-	AllowedTools  []string
+	RouterMode   bool
+	AllowedTools []string
 	// OnRouterViolation is the audit sink for executor-level refusals.
 	OnRouterViolation func(tool string)
 }

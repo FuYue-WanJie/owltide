@@ -193,14 +193,44 @@ func NewManager(opts ManagerOpts) (*Manager, error) {
 }
 
 // SetParent wires the main agent after construction (breaks the
-// agent<->manager setup cycle) and re-delivers any results that
+// agent<->manager setup cycle), registers StopAll on the agent's
+// run-abort paths (loop stop, budget stop, guard failure, context
+// cancellation, step error), and re-delivers any results that
 // finished in a previous process but were never delivered.
 func (m *Manager) SetParent(p *agent.Agent) {
 	m.mu.Lock()
 	m.opts.Parent = p
 	m.mu.Unlock()
+	p.SetOnRunEnd(m.StopAll)
 	m.recoverFinished()
 	m.reDeliverPending()
+}
+
+// StopAll cancels every running or queued sub-agent, returns the write
+// token, and releases each one's (idempotent) reservation. It runs on
+// the parent's abort paths so a stopped run never leaves reservations
+// behind (the audit log shows reserved-without-released otherwise).
+func (m *Manager) StopAll(reason string) {
+	m.mu.Lock()
+	var targets []*Session
+	for _, s := range m.sessions {
+		if s.State == StateRunning || s.State == StateQueued {
+			targets = append(targets, s)
+		}
+	}
+	m.mu.Unlock()
+	for _, s := range targets {
+		if s.Cancel != nil {
+			s.Cancel()
+		}
+		m.mu.Lock()
+		s.State = StateStopped
+		m.mu.Unlock()
+		m.transfer("main")
+		s.release() // idempotent
+		m.event("stopped", map[string]any{"id": s.ID, "by": "run_end", "reason": reason})
+		m.event("finished", map[string]any{"id": s.ID, "role": s.Role, "state": s.State})
+	}
 }
 
 // subEvent is one parsed audit record used for restart recovery.
@@ -569,7 +599,9 @@ func (m *Manager) ManagerTools() []tool.Tool {
 }
 
 // reserve attempts to pre-deduct def.Budget.MaxTokens from the parent
-// budget; refusal is an error (budget exhausted).
+// budget; refusal is an error (budget exhausted). The returned release
+// closure is idempotent: stop/abort paths and normal completion may
+// both call it, only the first call releases and logs.
 func (m *Manager) reserve(def agents.Def) (release func(), err error) {
 	parent := m.opts.Parent
 	if parent == nil {
@@ -584,9 +616,12 @@ func (m *Manager) reserve(def agents.Def) (release func(), err error) {
 		return nil, fmt.Errorf("parent budget exhausted; cannot start %q sub-agent", def.Name)
 	}
 	m.event("budget", map[string]any{"op": "reserved", "tokens": n, "role": def.Name})
+	var once sync.Once
 	return func() {
-		parent.ReleaseBudget(n)
-		m.event("budget", map[string]any{"op": "released", "tokens": n, "role": def.Name})
+		once.Do(func() {
+			parent.ReleaseBudget(n)
+			m.event("budget", map[string]any{"op": "released", "tokens": n, "role": def.Name})
+		})
 	}, nil
 }
 

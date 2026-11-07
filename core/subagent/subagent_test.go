@@ -1398,3 +1398,75 @@ func TestSendRefusesDeliveredSession(t *testing.T) {
 		t.Fatalf("session state changed on refusal: %q", state)
 	}
 }
+
+// TestLoopStopReleasesSubagentReservation: when the main agent's loop
+// detector stops the run, the OnRunEnd hook (StopAll) cancels the
+// running background sub-agent, returns its reservation, and the audit
+// log shows a released event for every reserved event.
+func TestLoopStopReleasesSubagentReservation(t *testing.T) {
+	n := 0
+	var mu sync.Mutex
+	script := func(_ int, req model.Request) string {
+		mu.Lock()
+		n++
+		call := n
+		mu.Unlock()
+		if strings.Contains(req.Messages[0].Content, "scout") {
+			// Sub-agent: slow first call so it is still running when
+			// the loop detector fires.
+			if call == 1 {
+				time.Sleep(1500 * time.Millisecond)
+			}
+			return textReply("sub work")
+		}
+		// Main agent: first reply spawns a sub-agent, then repeats the
+		// identical failing read to trip the loop detector.
+		if call == 1 {
+			return toolCall("cs1", "agent_start",
+				`{"role":"explore","task":"slow recon","mode":"single"}`)
+		}
+		return toolCall("cs"+itoa(call), "read_file", `{"path":"/nonexistent/loop.txt"}`)
+	}
+	f := newFixture(t, script, fxOpts{})
+
+	// The fixture manager is already registered on the parent's
+	// registry and SetParent wired OnRunEnd = StopAll.
+	parent := f.parent
+
+	_, runErr := parent.Run(context.Background(), "start recon then read the same missing file")
+	if runErr == nil || !strings.Contains(runErr.Error(), "loop detected") {
+		t.Fatalf("expected loop stop, got: %v", runErr)
+	}
+
+	// The reservation must be released: parent budget back to full.
+	def := f.agents["explore"]
+	full := f.m.opts.Config.Budget.MaxTokens
+	want := full - 0 // no outstanding reservations after StopAll
+	if got := parent.RemainingTokens(); got != want {
+		t.Fatalf("reservation leaked after loop stop: remaining=%d want=%d (explore budget %d)",
+			got, want, def.Budget.MaxTokens)
+	}
+	// Audit trail: reserved events all have matching released events.
+	res, rel := 0, 0
+	for l := range readLines(filepath.Join(f.cfgDir, "logs", "subagents.jsonl")) {
+		var e struct {
+			Event string `json:"event"`
+			Op    string `json:"op"`
+		}
+		if json.Unmarshal([]byte(l), &e) == nil && e.Event == "budget" {
+			switch e.Op {
+			case "reserved":
+				res++
+			case "released":
+				rel++
+			}
+		}
+	}
+	if res == 0 || res != rel {
+		t.Fatalf("budget events unbalanced: reserved=%d released=%d", res, rel)
+	}
+	// The write token is with main.
+	if f.m.WriteGate().Held() {
+		t.Fatal("write token must be with main after loop stop")
+	}
+}

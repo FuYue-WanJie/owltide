@@ -47,6 +47,18 @@ type Options struct {
 	// message appended to the in-memory history goes through logMsg,
 	// the single write entry point.
 	SessLog *sessionlog.Log
+	// OnRunEnd is called once when a Run ends on an ABORT path (loop
+	// stop, turn/token budget stop, guard failure, context
+	// cancellation, model error) with the reason; normal completions
+	// do not call it. The sub-agent manager uses it to stop running
+	// sub-agents and release their reservations.
+	OnRunEnd func(reason string)
+}
+
+// SetOnRunEnd wires the abort hook after construction (the sub-agent
+// manager is built after the parent agent).
+func (a *Agent) SetOnRunEnd(fn func(reason string)) {
+	a.opts.OnRunEnd = fn
 }
 
 // logMsg appends one message to the in-memory history and, when
@@ -280,13 +292,14 @@ func (a *Agent) Run(ctx context.Context, userText string) (string, error) {
 	a.logMsg(model.Message{Role: model.RoleUser, Content: userText})
 
 	var (
-		final      string
-		toolRecs   []decision.ToolRecord
-		runErr     error
-		steps      int
-		budgetStop string // non-empty when a budget cap forced the wrap-up
-		turnPrompt int    // usage summed over this turn's model calls
-		turnCompl  int
+		final       string
+		toolRecs    []decision.ToolRecord
+		runErr      error
+		steps       int
+		budgetStop  string // non-empty when a budget cap forced the wrap-up
+		turnPrompt  int    // usage summed over this turn's model calls
+		turnCompl   int
+		abortReason string // non-empty on abort paths: passed to OnRunEnd
 	)
 	for {
 		if ctx.Err() != nil {
@@ -299,17 +312,20 @@ func (a *Agent) Run(ctx context.Context, userText string) (string, error) {
 		if a.opts.Guard != nil && a.lastSnap != nil {
 			if v, f := a.opts.Guard.Verify(a.lastSnap); len(v) > 0 || len(f) > 0 {
 				runErr = fmt.Errorf("protected files were modified outside tool calls; run aborted")
+				abortReason = "guard_verify"
 				break
 			}
 		}
 		steps++
 		if steps > a.maxTurns() {
 			budgetStop = "turn_limit"
+			abortReason = "turn_limit"
 			final = a.wrapUp("turn limit reached")
 			break
 		}
 		if a.tokens > a.maxTokens() {
 			budgetStop = "token_budget"
+			abortReason = "token_budget"
 			final = a.wrapUp("token budget exhausted")
 			break
 		}
@@ -317,6 +333,7 @@ func (a *Agent) Run(ctx context.Context, userText string) (string, error) {
 		if a.fatalGuard {
 			final = a.wrapUp("guard restore failure; run aborted for safety")
 			runErr = fmt.Errorf("guard restore failed; run aborted")
+			abortReason = "guard_restore"
 			break
 		}
 		msg, usage, err := a.step(ctx)
@@ -327,6 +344,7 @@ func (a *Agent) Run(ctx context.Context, userText string) (string, error) {
 		a.lastCachedReported = usage.CachedReported
 		if err != nil {
 			runErr = err
+			abortReason = "model_error"
 			break
 		}
 		a.logMsg(msg)
@@ -359,8 +377,12 @@ func (a *Agent) Run(ctx context.Context, userText string) (string, error) {
 			final = a.wrapUp("loop detected: same tool call with same result repeated; stopping")
 			runErr = fmt.Errorf("loop detected; run stopped (see decisions log)")
 			a.loopStopped = true
+			abortReason = "loop_stop"
 			break
 		}
+	}
+	if abortReason != "" && a.opts.OnRunEnd != nil {
+		a.opts.OnRunEnd(abortReason)
 	}
 
 	a.logTurn(start, userText, toolRecs, len(toolRecs) == 0, runErr, budgetStop, turnPrompt, turnCompl)

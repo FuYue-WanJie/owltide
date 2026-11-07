@@ -95,8 +95,7 @@ func (agentStart) Schema() tool.Definition {
 			`"role":{"type":"string"},"task":{"type":"string"},"mode":{"type":"string"},`+
 				`"tasks":{"type":"array","items":{"anyOf":[{"type":"string"},`+
 				`{"type":"object","properties":{"role":{"type":"string"},"task":{"type":"string"}},`+
-				`"required":["task"]}}]},`+
-				`"steps":{"type":"array","items":{"type":"object","properties":{`+
+				`"required":["task"]}]}},"steps":{"type":"array","items":{"type":"object","properties":{`+
 				`"role":{"type":"string"},"task":{"type":"string"}}}},`+
 				`"context_refs":{"type":"array","items":{"type":"string"}}`,
 			"role", "task", "mode"),

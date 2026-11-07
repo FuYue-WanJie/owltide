@@ -132,3 +132,9 @@ cmd/owltide/  CLI 入口（chat 交互 / run 一次性）
   3. `b664008` cached_reported 贯通（Usage→decision v2→changes）：端点不返回 prompt_tokens_details 时显示「未上报」而非 0%
   - 真实会话缓存测试（ltzy nemotron-3.5，chat 两轮建/改 notes.md）：两轮 prefix_hash 完全一致（e9af9f157d9ed906…，prefix stable: true）；端点上报 cached_tokens 字段但两轮均 0（该端点对此模型不做前缀缓存）；changes 尾行「cache: 2 turns, 0.0% prompt tokens served from provider cache (prefix stable: true)」
   - Go 升级 go.mod → 1.26.10（工具链验证 + 全量测试 8 包绿 + vet 干净）；govulncheck ./... = No vulnerabilities found
+
+- [2026-11-07] 密钥泄漏事件与整改：
+  - 事故：e57a1aa（P1.5 第 2 项）的 spill 测试夹具误用了真实 key 并推送。事前扫描输出 5 处命中，但操作上未把非零计数当硬停（手敲 one-liner 无强制门禁），推后又用空区间（origin/main..HEAD）复扫误称 0 命中——扫描方法本身没问题，错在执行层。用户决定：作废旧 key 重新签发，不改写历史不 force push
+  - 整改 `6a9efe3`：测试夹具换假 key（sk-TESTKEY…，断言同步）；新规矩：任何提交/测试/日志/汇报不得出现真实密钥，测试一律伪造值
+  - 门禁：scripts/secretscan（sh，规则=sk- 系/常见令牌前缀/PEM/Bearer/高熵(≥32 字符，hex 4.0 上限不误伤、含 / 的路径形 4.5、其余 4.1)/本地配置 key 的 sha256 比对（只存哈希：env 实时算 + scripts/secretscan.hashes 钉住已撤销旧 key））；scripts/hooks/pre-push + core.hooksPath（hook 从 $0 解析扫描器位置，跨 clone 可用）；已撤销 key 只出现在 diff 删除行时放行（修复提交不拦），出现于 + 行即拦
+  - 测试 scripts/secretscan_test.go：假 key 提交被拦（TestSecretScanBlocksFakeKeyCommit，key 运行时拼接、源码无触发字面量）、正常内容不误报（TestSecretScanCleanTreePasses：模块路径/SHA/spill id）、高熵被拦（TestSecretScanBlocksHighEntropy）、钉住哈希连 TEST 标记也拦（TestSecretScanHashRulePinned）、端到端 pre-push（TestPrePushHookEndToEnd：bare origin + clone，干净推送成功、密钥推送被拒且远端未收到）

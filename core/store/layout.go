@@ -9,9 +9,9 @@ import (
 )
 
 // Layout of the ~/.owltide configuration directory.
-var Dirs = []string{"agents", "skills", "memory", "channels", "logs"}
+var Dirs = []string{"agents", "skills", "memory", "channels", "logs", "sessions"}
 
-const gitignore = "logs/\n"
+const gitignore = "logs/\nspill/\nsessions/\n"
 
 // EnsureLayout creates the directory skeleton and .gitignore.
 func EnsureLayout(dir string) error {

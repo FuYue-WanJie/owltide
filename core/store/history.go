@@ -111,7 +111,7 @@ func (s *Store) Checkout(commitID string) error {
 	if err != nil {
 		return err
 	}
-	removeStale(s.Dir, "", flat, map[string]bool{".git": true, "logs": true, stashDir: true})
+	removeStale(s.Dir, "", flat, map[string]bool{".git": true, "logs": true, "spill": true, "sessions": true, stashDir: true})
 	if err := s.materialize(treeID, ""); err != nil {
 		return err
 	}

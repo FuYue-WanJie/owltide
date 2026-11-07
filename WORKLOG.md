@@ -196,3 +196,8 @@ cmd/owltide/  CLI 入口（chat 交互 / run 一次性）
   2. router 模式 `c49c634`+`54c6e08`：config `mode: router` 或 CLI --router。主代理工具白名单=agent_start/agent_status/agent_result/agent_send/todo/ask_user（没有 run_shell、没有写文件）；强制在两层——registry 层过滤 + 执行器层兜底（硬调被过滤工具返回「router 模式下请委派子代理」并写 router_violation 审计事件）；单写者：同时最多一个非只读子代理 running，第二个写任务报错不排队（选择报错：排队会阻塞主循环且模型需要显式决策先 stop 还是先收结果；只读角色不受限）；新内置角色 worker（v3）：可写执行者，run_shell/write/edit，与主代理同 guard；ask_user 进 router 白名单。测试：执行器拒绝+审计 sink、单写者拒绝/放行/非 router 不变、worker 角色形状
   - 决策记录：单写者冲突选「报错不排队」——排队会让 agent_start 阻塞到前一个 worker 结束，模型失去调度权；报错把选择权（stop 或等结果）还给模型，错误文案带两条出路
   - 验证：go build/vet/gofmt 干净；go test ./... 12 包全绿；lightning 真模型 router 一场（详见验收记录）
+  - M3 验收（lightning，router 真模型一场，2 次尝试）：
+    - 第 1 次（15:41）：模型在受限工具表下退化——以文本手写伪 XML「函数调用」、ask_user 问出不相关的角色选择题、24 次 router_violation（执行器层全部拦截，无一次 run_shell/write 真执行），turn_limit 截停。结论：router 模式下主代理提示词需要一句「派 worker 修」的引导，过滤层本身工作正常
+    - 第 2 次（15:52）：提示词明确 role=worker 后一次成功。证据链：主会话 0 条 run_shell 结果（agent_upsert 硬调被拒：「router 模式下请委派子代理」，router_violation 3 条）；worker 子代理（sub-2166f998，22 条转录）完成修复 + go test；目标仓库 git diff 证实 calc.go 一行修复、go test 通过；预算 worker reserved 150000/released 150000 配平（第二个冗余 worker 的泄漏见下）；主会话 decisions p 48050/c 2212
+    - 验收中发现的最后一个泄漏：主代理在首个 worker 交付后又派了一个冗余 worker，主 Run 正常完成（成功路径不触发 OnRunEnd）进程退出，第二个 worker 的 150000 reserved 无 released（workers 计 reserved 2/released 1）。修复 adb6454：runOneShot 在 Run 返回后调 mgr.StopAll("oneshot_end")（与完成 watchdog 幂等）；chat 多轮之间保留后台子代理不变
+    - 说明：`owltide changes` 只跟踪 config store（自进化），worker 对目标仓库的文件修改不进该报告——worker 的改动以目标仓库 git diff 为准

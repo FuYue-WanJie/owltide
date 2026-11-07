@@ -106,7 +106,7 @@ cmd/owltide/  CLI 入口（chat 交互 / run 一次性）
   - 端点兼容：模型端点只接受 `[a-zA-Z0-9_-]` 工具名——Agent 可见名改下划线（agent_upsert 等），提交元数据保留点号名（agent.upsert）
   - 真模型冲烟（nemotron-3.5）：①「新建 reviewer 子代理」成功——定义文件+提交（who=agent tool=agent.upsert session=…）、真 git log 可读；②锁定 agent:reviewer 后让模型改/删——agent_upsert×2+agent_remove 全被拒、文件未动、决策日志有记录；③最终二进制隔离 HOME 复跑——git status 干净、fsck ok、logs/ 未入提交
 
-- [2026-11-06] P0+P1 推送完成：28+4 提交全部上 origin/main（fast-forward，无 force）。推送前对数澄清：之前报 16 是只数了 P1 段（a8ac633..HEAD），漏报 P0 的 11——P0 实际从未推送。未推历史经 filter-branch 洗掉 WORKLOG 里的私有端点域名（ltzy.top），终扫 sk-/ltzy/key 值 0 命中。
+- [2026-11-06] P0+P1 推送完成：28+4 提交全部上 origin/main（fast-forward，无 force）。推送前对数澄清：之前报 16 是只数了 P1 段（a8ac633..HEAD），漏报 P0 的 11——P0 实际从未推送。未推历史经 filter-branch 洗掉 WORKLOG 里的私有端点域名（用户端点），终扫密钥/端点名/key 值 0 命中。
 - [2026-11-06] P1 补充三项（各自独立提交）：
   1. 哈希锚定编辑 `1150c66`：read_file 尾部附 [sha256:...] 标记；edit_file 必填 expect_sha256，不匹配拒绝并返回最新片段（old_string 附近 ±5 行或文件头 25 行）
   2. agents/*.md 格式 `43bdeb8`：frontmatter（name/description/model/tools/budget）+ markdown body 即 system_prompt；Save/Load/Remove 全切 .md；Def.FilterRegistry 是白名单强制点（子代理注册表只含白名单工具，P2 调度接入）；校验新增 description 必填
@@ -130,7 +130,7 @@ cmd/owltide/  CLI 入口（chat 交互 / run 一次性）
   1. `7d10a6d` 动态词危险范围收窄：命令名不可静态求值→危险；风险命令集（rm/find/git/dd/chmod/chown/mkfs*/sh 系/eval/xargs/sudo 系/env/cp/mv/ln/truncate/shred/关机系/mount/fdisk/kill 系/chattr/setfacl/tee）+ 参数动态→危险；其他命令动态参数放行（$(...) 子命令仍递归检查）；动态重定向目标（> $F）→危险。危险侧 $X -rf、rm -rf $TARGET、rm $(find /)、find $DIR -delete、git push $REMOTE --force 全命中；安全侧新增 go test $(go list ./...)、cd "$HOME"、echo $PATH、ls $DIR、cat ${CONFIG_FILE}、echo $(date)
   2. `cf9bae0` 复述消息加 [AUTO — not a new user message] 前缀 + system prompt 一句说明（固定前缀一部分，一次改定不破缓存）；清 loop.go 死代码 var _ = sort.Strings
   3. `b664008` cached_reported 贯通（Usage→decision v2→changes）：端点不返回 prompt_tokens_details 时显示「未上报」而非 0%
-  - 真实会话缓存测试（ltzy nemotron-3.5，chat 两轮建/改 notes.md）：两轮 prefix_hash 完全一致（e9af9f157d9ed906…，prefix stable: true）；端点上报 cached_tokens 字段但两轮均 0（该端点对此模型不做前缀缓存）；changes 尾行「cache: 2 turns, 0.0% prompt tokens served from provider cache (prefix stable: true)」
+  - 真实会话缓存测试（用户端点 nemotron-3.5，chat 两轮建/改 notes.md）：两轮 prefix_hash 完全一致（e9af9f157d9ed906…，prefix stable: true）；端点上报 cached_tokens 字段但两轮均 0（该端点对此模型不做前缀缓存）；changes 尾行「cache: 2 turns, 0.0% prompt tokens served from provider cache (prefix stable: true)」
   - Go 升级 go.mod → 1.26.10（工具链验证 + 全量测试 8 包绿 + vet 干净）；govulncheck ./... = No vulnerabilities found
 
 - [2026-11-07] 密钥泄漏事件与整改：

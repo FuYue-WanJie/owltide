@@ -196,10 +196,15 @@ func (t agentStart) startSingle(ctx context.Context, a startArgs) (string, error
 			return
 		}
 		s.Summary = oc.summary
-		if oc.err == nil {
-			s.State = StateDone
-		} else {
-			s.State = StateFailed
+		// runSession already determined the terminal state (done /
+		// failed / budget_exhausted); only fill in a state when the
+		// run never got that far.
+		if s.State != StateDone && s.State != StateFailed && s.State != StateBudgetExhausted {
+			if oc.err == nil {
+				s.State = StateDone
+			} else {
+				s.State = StateFailed
+			}
 		}
 		s.release()
 		m.deliver(s)

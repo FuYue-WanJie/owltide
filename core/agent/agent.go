@@ -367,7 +367,7 @@ func (a *Agent) Run(ctx context.Context, userText string) (string, error) {
 	return final, runErr
 }
 
-// step makes one model call.
+// step makes one model call with the full toolset.
 func (a *Agent) step(ctx context.Context) (model.Message, model.Usage, error) {
 	req := model.Request{
 		Model:    a.opts.Config.Model.Name,
@@ -375,6 +375,22 @@ func (a *Agent) step(ctx context.Context) (model.Message, model.Usage, error) {
 	}
 	if defs := a.opts.Tools.Definitions(); len(defs) > 0 {
 		req.Tools = defsToAny(defs)
+	}
+	return a.opts.Client.Stream(ctx, req, func(sr model.StreamResult) {
+		if a.opts.OnDelta != nil {
+			a.opts.OnDelta(sr.Content)
+		}
+	})
+}
+
+// stepNoTools makes one model call with the toolset stripped: used by
+// wrap-up, where the only acceptable answer is plain text. The request
+// prefix (system + tools) is unchanged for cache stability; tools are
+// dropped from the wire payload only.
+func (a *Agent) stepNoTools(ctx context.Context) (model.Message, model.Usage, error) {
+	req := model.Request{
+		Model:    a.opts.Config.Model.Name,
+		Messages: a.viewForModel(),
 	}
 	return a.opts.Client.Stream(ctx, req, func(sr model.StreamResult) {
 		if a.opts.OnDelta != nil {
@@ -466,19 +482,34 @@ func (a *Agent) execTool(ctx context.Context, tc model.ToolCall) decision.ToolRe
 	return rec
 }
 
-// wrapUp asks the model to finish within constraints.
+// BudgetExhaustedSummary is the fixed final text when the wrap-up call
+// cannot produce a usable summary (tool call or empty). It is never
+// empty, so no delivery path can treat "" as a summary. Exported for
+// the sub-agent manager's delivery guard.
+const BudgetExhaustedSummary = "子代理在步数预算内未完成，没有摘要"
+
+const budgetExhaustedSummary = BudgetExhaustedSummary
+
+// wrapUp asks the model to finish within constraints. The wrap-up call
+// carries no tools: the only acceptable answer is plain text. If the
+// model still returns a tool call (or empty text), the call is NOT
+// executed and the fixed budget-exhausted summary is returned instead —
+// an empty string must never become a delivered summary.
 func (a *Agent) wrapUp(reason string) string {
 	a.logMsg(model.Message{
 		Role: model.RoleUser,
 		Content: fmt.Sprintf(
 			"System: %s. Stop working and give a brief final summary of what was done.", reason),
 	})
-	msg, usage, err := a.step(context.Background())
+	msg, usage, err := a.stepNoTools(context.Background())
 	a.tokens += usage.Total()
 	if err != nil {
 		return "(failed to produce summary: " + err.Error() + ")"
 	}
 	a.logMsg(msg)
+	if len(msg.ToolCalls) > 0 || strings.TrimSpace(msg.Content) == "" {
+		return budgetExhaustedSummary
+	}
 	return msg.Content
 }
 

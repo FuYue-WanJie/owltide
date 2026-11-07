@@ -53,6 +53,10 @@ const (
 	// process crashed; it is reported to the main agent on restart
 	// (no result) and delivered exactly once like any other result.
 	StateInterrupted = "interrupted"
+	// StateBudgetExhausted marks a run whose wrap-up could not produce
+	// a usable summary (the fixed exhausted-summary text is delivered
+	// instead); it must never be recorded as done.
+	StateBudgetExhausted = "budget_exhausted"
 )
 
 // ManagerOpts wires the manager to the parent's world.
@@ -285,7 +289,7 @@ func (m *Manager) recoverFinished() {
 			continue
 		}
 		switch s.state {
-		case StateDone, StateFailed:
+		case StateDone, StateFailed, StateBudgetExhausted:
 			m.sessions[id] = &Session{
 				ID:      id,
 				Role:    s.role,
@@ -340,7 +344,8 @@ func (m *Manager) reDeliverPending() {
 	m.mu.Lock()
 	var pending []*Session
 	for _, s := range m.sessions {
-		if (s.State == StateDone || s.State == StateFailed || s.State == StateInterrupted) && !s.Delivered {
+		if (s.State == StateDone || s.State == StateFailed || s.State == StateInterrupted ||
+			s.State == StateBudgetExhausted) && !s.Delivered {
 			pending = append(pending, s)
 		}
 	}
@@ -354,12 +359,21 @@ func (m *Manager) reDeliverPending() {
 // conversation log exactly once: a synthetic agent_result tool-call
 // pair appended to the session log and pushed to the parent, plus a
 // delivered audit event. Later agent_result calls return only a ref.
+// Hard rule: an empty summary is never delivered — it is replaced by
+// the fixed budget-exhausted text and the state downgraded to
+// budget_exhausted.
 func (m *Manager) deliver(s *Session) {
 	m.mu.Lock()
 	if s.Delivered || m.deliveredSeen[s.ID] {
 		s.Delivered = true
 		m.mu.Unlock()
 		return
+	}
+	if strings.TrimSpace(s.Summary) == "" && s.State != StateInterrupted {
+		s.Summary = agent.BudgetExhaustedSummary
+		if s.State == StateDone {
+			s.State = StateBudgetExhausted
+		}
 	}
 	s.Delivered = true
 	m.mu.Unlock()
@@ -625,9 +639,15 @@ func (m *Manager) runSession(ctx context.Context, s *Session) (string, error) {
 	s.Agent = agent.New(opts)
 	summary, err := s.Agent.Run(ctx, s.Task)
 	s.Summary = summary
-	if err != nil {
+	switch {
+	case err != nil:
 		s.State = StateFailed
-	} else {
+	case strings.TrimSpace(summary) == "" ||
+		summary == agent.BudgetExhaustedSummary:
+		// The wrap-up could not produce a usable summary: never record
+		// this as a successful done run with an empty deliverable.
+		s.State = StateBudgetExhausted
+	default:
 		s.State = StateDone
 	}
 	m.transfer("main") // defer-style release on every exit path

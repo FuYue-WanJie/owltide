@@ -1093,3 +1093,93 @@ func TestRunningSubagentReportedInterrupted(t *testing.T) {
 		t.Fatalf("second restart must not add messages: %d -> %d", len(msgs), got)
 	}
 }
+
+// TestWrapUpToolCallYieldsFixedSummary: when a sub-agent burns its turn
+// budget and the wrap-up call itself answers with a tool call (or empty
+// text), the run is recorded budget_exhausted (never done) and the
+// delivered summary is the fixed non-empty text. The wrap-up request
+// must carry no tools.
+func TestWrapUpToolCallYieldsFixedSummary(t *testing.T) {
+	var wrapUpHadTools bool
+	n := 0
+	var mu sync.Mutex
+	srv := fakeLLM2(t, func(k int, req model.Request) string {
+		mu.Lock()
+		n++
+		hasTools := len(req.Tools) > 0
+		if req.Messages[len(req.Messages)-1].Role == "user" &&
+			strings.Contains(req.Messages[len(req.Messages)-1].Content, "Stop working") {
+			wrapUpHadTools = hasTools
+		}
+		mu.Unlock()
+		// Every call, including the wrap-up, answers with a tool call.
+		return toolCall("cw"+itoa(n), "list_dir", `{"path":"."}`)
+	})
+	f := newFixture(t, nil, fxOpts{})
+	f.m.opts.Client = model.NewClient(srv.URL, "k", nil)
+
+	before := f.parent.RemainingTokens()
+	def := f.agents["explore"] // max_turns: 10
+	// Shrink the role budget to reach the turn limit fast.
+	def.Budget.MaxTurns = 1
+	f.m.opts.Agents["explore"] = def
+
+	st := f.m.ManagerTools()[0].(interface {
+		Call(context.Context, json.RawMessage) (string, error)
+	})
+	out, err := st.Call(context.Background(), json.RawMessage(
+		`{"role":"explore","task":"wander around","mode":"single"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if wrapUpHadTools {
+		t.Fatal("wrap-up request must not carry tools")
+	}
+	// The delivered content is the fixed text (from the main session
+	// log). The run is background: poll until the watchdog delivers.
+	var msgs []model.Message
+	var rerr error
+	found := false
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		msgs, _, rerr = sessionlog.RebuildWithWarning(
+			filepath.Join(f.root, "sessions", "main", "messages.jsonl"))
+		if rerr != nil {
+			t.Fatal(rerr)
+		}
+		for _, m := range msgs {
+			if m.Role == "tool" && strings.Contains(m.Content, agent.BudgetExhaustedSummary) {
+				found = true
+			}
+		}
+		if found {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !found {
+		t.Fatalf("fixed exhausted summary not delivered; out=%s", out)
+	}
+	// Session state is budget_exhausted, and the reservation returned.
+	var s *Session
+	f.m.mu.Lock()
+	for _, sess := range f.m.sessions {
+		s = sess
+		break
+	}
+	f.m.mu.Unlock()
+	deadline2 := time.Now().Add(3 * time.Second)
+	for s.State != StateBudgetExhausted && time.Now().Before(deadline2) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	f.m.mu.Lock()
+	state := s.State
+	f.m.mu.Unlock()
+	if state != StateBudgetExhausted {
+		t.Fatalf("state = %q, want budget_exhausted", state)
+	}
+	if after := f.parent.RemainingTokens(); after != before {
+		t.Fatalf("reservation not returned: %d -> %d", before, after)
+	}
+}

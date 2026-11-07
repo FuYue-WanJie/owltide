@@ -26,6 +26,14 @@ type Def struct {
 	SystemPrompt string   `yaml:"-"`        // markdown body
 	Tools        []string `yaml:"tools"`
 	Budget       Budget   `yaml:"budget"`
+	// Builtin marks one of the four seeded roles: users may edit but
+	// not delete; self-evolution may never widen their tool whitelist
+	// or drop their readonly flag.
+	Builtin bool `yaml:"builtin,omitempty"`
+	// Readonly roles receive only tools declared as read-only at
+	// registration; any tool lacking an explicit read-only declaration
+	// is treated as writing and refused system-side.
+	Readonly bool `yaml:"readonly,omitempty"`
 }
 
 // frontmatter wraps fields as a markdown header block.

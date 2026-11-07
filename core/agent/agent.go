@@ -10,12 +10,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/FuYue-WanJie/owltide/core/config"
 	"github.com/FuYue-WanJie/owltide/core/decision"
 	"github.com/FuYue-WanJie/owltide/core/guard"
 	"github.com/FuYue-WanJie/owltide/core/model"
+	"github.com/FuYue-WanJie/owltide/core/sessionlog"
 	"github.com/FuYue-WanJie/owltide/core/spill"
 	"github.com/FuYue-WanJie/owltide/core/tool"
 )
@@ -40,17 +42,37 @@ type Options struct {
 	// defaults. TodoDir empty disables the todo tool.
 	Loop    LoopConfig
 	TodoDir string
+	// SessLog is the append-only main-conversation message log
+	// (core/sessionlog); nil disables persistence (tests). Every
+	// message appended to the in-memory history goes through logMsg,
+	// the single write entry point.
+	SessLog *sessionlog.Log
+}
+
+// logMsg appends one message to the in-memory history and, when
+// wired, the persistent session log. This is the ONLY entry point for
+// extending the conversation.
+func (a *Agent) logMsg(m model.Message) {
+	a.messages = append(a.messages, m)
+	if a.opts.SessLog != nil {
+		_ = a.opts.SessLog.Append(m) // persistence errors surface on rebuild
+	}
 }
 
 // Agent runs the loop.
 type Agent struct {
-	opts               Options
-	messages           []model.Message
-	tokens             int
-	turn               int
+	opts     Options
+	messages []model.Message
+	tokens   int
+	turn     int
+	budgetMu sync.Mutex
+	reserved int // tokens reserved for running sub-agents
+
 	lastCached         int
 	lastCachedReported bool
 	fatalGuard         bool // restore failure: stop the loop
+	noticeMu           sync.Mutex
+	notices            []model.Message // async event messages injected at next model call
 	// lastSnap is the most recent trusted protected-set snapshot.
 	lastSnap   guard.Snapshot
 	prefixHash string // stable request prefix (system + tools)
@@ -103,6 +125,82 @@ func prefixJSON(v any) []byte {
 	return b.Bytes()
 }
 
+// NewResultToolCall renders the synthetic (assistant tool_call, tool
+// result) message pair used to fold an async sub-agent result into the
+// main conversation. The tool result carries the data-not-instruction
+// marker; both messages are appended to the persistent main-conversation
+// log (core/sessionlog) at injection time so a resume rebuilds exactly
+// what the model saw. The pair is delivered exactly once: delivery is
+// recorded in the subagent audit events (delivered), and restarts
+// re-inject only results that finished but were never delivered.
+func NewResultToolCall(id, content string) (assistant, tool model.Message) {
+	return model.Message{
+			Role: model.RoleAssistant,
+			ToolCalls: []model.ToolCall{{
+				ID:   "subnotice-" + id,
+				Type: "function",
+				Function: model.Function{
+					Name:      "agent_result",
+					Arguments: `{"id":"` + id + `"}`,
+				},
+			}},
+		}, model.Message{
+			Role:       model.RoleTool,
+			Name:       "agent_result",
+			ToolCallID: "subnotice-" + id,
+			Content:    content,
+		}
+}
+
+// PushResult queues one synthetic result pair for injection at the
+// next model call. The caller (subagent.Manager) has already appended
+// the same pair to the persistent main-conversation log.
+func (a *Agent) PushResult(assistant, tool model.Message) {
+	a.noticeMu.Lock()
+	a.notices = append(a.notices, assistant, tool)
+	a.noticeMu.Unlock()
+}
+
+// takeNotices drains queued notices.
+func (a *Agent) takeNotices() []model.Message {
+	a.noticeMu.Lock()
+	defer a.noticeMu.Unlock()
+	out := a.notices
+	a.notices = nil
+	return out
+}
+
+// ReserveBudget atomically reserves n tokens from this agent's
+// remaining budget; returns false when the remainder is insufficient.
+// ReleaseBudget returns unused reservation on sub-agent completion.
+func (a *Agent) ReserveBudget(n int) bool {
+	a.budgetMu.Lock()
+	defer a.budgetMu.Unlock()
+	remain := a.maxTokens() - a.tokens - a.reserved
+	if n > remain {
+		return false
+	}
+	a.reserved += n
+	return true
+}
+
+// ReleaseBudget returns unused reserved tokens.
+func (a *Agent) ReleaseBudget(n int) {
+	a.budgetMu.Lock()
+	a.reserved -= n
+	if a.reserved < 0 {
+		a.reserved = 0
+	}
+	a.budgetMu.Unlock()
+}
+
+// RemainingTokens reports the unspent, unreserved budget.
+func (a *Agent) RemainingTokens() int {
+	a.budgetMu.Lock()
+	defer a.budgetMu.Unlock()
+	return a.maxTokens() - a.tokens - a.reserved
+}
+
 // maxTurnsFallback guards against an unset budget.
 func (a *Agent) maxTurns() int {
 	if a.opts.Config.Budget.MaxTurns > 0 {
@@ -124,7 +222,7 @@ func (a *Agent) Run(ctx context.Context, userText string) (string, error) {
 	start := time.Now()
 	a.turn++
 
-	a.messages = append(a.messages, model.Message{Role: model.RoleUser, Content: userText})
+	a.logMsg(model.Message{Role: model.RoleUser, Content: userText})
 
 	var (
 		final      string
@@ -172,7 +270,7 @@ func (a *Agent) Run(ctx context.Context, userText string) (string, error) {
 			runErr = err
 			break
 		}
-		a.messages = append(a.messages, msg)
+		a.logMsg(msg)
 
 		if len(msg.ToolCalls) == 0 {
 			final = msg.Content
@@ -190,7 +288,7 @@ func (a *Agent) Run(ctx context.Context, userText string) (string, error) {
 				input := tc.Function.Arguments
 				switch a.loops.observe(tc.Function.Name, input, last.Content) {
 				case "remind":
-					a.messages = append(a.messages, model.Message{
+					a.logMsg(model.Message{
 						Role: model.RoleUser, Content: loopReminder,
 					})
 				case "stop":
@@ -240,7 +338,7 @@ func (a *Agent) execTool(ctx context.Context, tc model.ToolCall) decision.ToolRe
 		if err != nil {
 			// Fail closed: refuse the tool instead of skipping the guard.
 			rec := decision.ToolRecord{Name: tc.Function.Name, Error: "snapshot failed: " + err.Error()}
-			a.messages = append(a.messages, model.Message{
+			a.logMsg(model.Message{
 				Role: model.RoleTool, Name: tc.Function.Name,
 				ToolCallID: tc.ID,
 				Content:    "tool refused: protected-file snapshot unavailable: " + err.Error(),
@@ -302,7 +400,7 @@ func (a *Agent) execTool(ctx context.Context, tc model.ToolCall) decision.ToolRe
 		}
 	}
 
-	a.messages = append(a.messages, model.Message{
+	a.logMsg(model.Message{
 		Role: model.RoleTool, Name: tc.Function.Name,
 		ToolCallID: tc.ID, Content: result,
 	})
@@ -311,7 +409,7 @@ func (a *Agent) execTool(ctx context.Context, tc model.ToolCall) decision.ToolRe
 
 // wrapUp asks the model to finish within constraints.
 func (a *Agent) wrapUp(reason string) string {
-	a.messages = append(a.messages, model.Message{
+	a.logMsg(model.Message{
 		Role: model.RoleUser,
 		Content: fmt.Sprintf(
 			"System: %s. Stop working and give a brief final summary of what was done.", reason),
@@ -321,7 +419,7 @@ func (a *Agent) wrapUp(reason string) string {
 	if err != nil {
 		return "(failed to produce summary: " + err.Error() + ")"
 	}
-	a.messages = append(a.messages, msg)
+	a.logMsg(msg)
 	return msg.Content
 }
 

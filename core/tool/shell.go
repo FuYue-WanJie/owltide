@@ -17,6 +17,10 @@ type shellArgs struct {
 	WorkingDir string `json:"working_dir"`
 }
 
+// Caps: executes subprocesses (may also touch the network via
+// commands; read-only roles get a parser-gated view instead).
+func (*Shell) Caps() Caps { return CapExec }
+
 // Shell runs a command through the platform shell.
 // Timeout, output truncation, and the danger gate protect the loop.
 type Shell struct {
@@ -46,6 +50,13 @@ func (s *Shell) SetConfirmer(c Confirmer) { s.confirmer = c }
 
 // setConfirmer implements confirmerHolder.
 func (s *Shell) setConfirmer(c Confirmer) { s.SetConfirmer(c) }
+
+// CloneWithConfirmer returns a copy of s with its own confirmer.
+func (s *Shell) CloneWithConfirmer(c Confirmer) Tool {
+	s2 := *s
+	s2.confirmer = c
+	return &s2
+}
 
 func (Shell) Schema() Definition {
 	return Definition{

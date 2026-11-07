@@ -92,6 +92,10 @@ func pathsForLockID(root, id string) []string {
 	return nil
 }
 
+// ProtectedPaths returns the current protected set as absolute paths
+// (read rule for sub-agent context_refs: these are refused).
+func (g *Guard) ProtectedPaths() []string { return g.paths() }
+
 // Snapshot captures content, permissions, and absence of every
 // protected path. Symlinks in the protected set are an error: they
 // redirect writes outside the managed tree.

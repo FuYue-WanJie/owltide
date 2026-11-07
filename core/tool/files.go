@@ -80,6 +80,9 @@ func (ReadFile) Schema() Definition {
 	}
 }
 
+// Caps: pure read.
+func (ReadFile) Caps() Caps { return CapReads }
+
 func (ReadFile) Call(_ context.Context, args json.RawMessage) (string, error) {
 	var a fileArgs
 	if err := json.Unmarshal(args, &a); err != nil {
@@ -120,6 +123,13 @@ type WriteFile struct{ confirmer Confirmer }
 // setConfirmer implements confirmerHolder (pointer receiver so the
 // registry mutation is visible to Call).
 func (w *WriteFile) setConfirmer(c Confirmer) { w.confirmer = c }
+
+// CloneWithConfirmer returns a copy with its own confirmer.
+func (w *WriteFile) CloneWithConfirmer(c Confirmer) Tool {
+	w2 := *w
+	w2.confirmer = c
+	return &w2
+}
 
 func (*WriteFile) Schema() Definition {
 	return Definition{
@@ -169,6 +179,13 @@ type EditFile struct{ confirmer Confirmer }
 
 // setConfirmer implements confirmerHolder.
 func (e *EditFile) setConfirmer(c Confirmer) { e.confirmer = c }
+
+// CloneWithConfirmer returns a copy with its own confirmer.
+func (e *EditFile) CloneWithConfirmer(c Confirmer) Tool {
+	e2 := *e
+	e2.confirmer = c
+	return &e2
+}
 
 func (*EditFile) Schema() Definition {
 	return Definition{
@@ -240,6 +257,9 @@ func (ListDir) Schema() Definition {
 		},
 	}
 }
+
+// Caps: pure read.
+func (ListDir) Caps() Caps { return CapReads }
 
 func (ListDir) Call(_ context.Context, args json.RawMessage) (string, error) {
 	var a fileArgs

@@ -12,14 +12,17 @@ import (
 	"time"
 
 	"github.com/FuYue-WanJie/owltide/core/agent"
+	"github.com/FuYue-WanJie/owltide/core/agents"
 	"github.com/FuYue-WanJie/owltide/core/config"
 	"github.com/FuYue-WanJie/owltide/core/decision"
 	"github.com/FuYue-WanJie/owltide/core/evolve"
 	"github.com/FuYue-WanJie/owltide/core/guard"
 	"github.com/FuYue-WanJie/owltide/core/model"
 	"github.com/FuYue-WanJie/owltide/core/platform"
+	"github.com/FuYue-WanJie/owltide/core/sessionlog"
 	"github.com/FuYue-WanJie/owltide/core/spill"
 	"github.com/FuYue-WanJie/owltide/core/store"
+	"github.com/FuYue-WanJie/owltide/core/subagent"
 	"github.com/FuYue-WanJie/owltide/core/tool"
 )
 
@@ -122,14 +125,14 @@ func must(err error) {
 }
 
 // setup builds everything an agent run needs.
-func setup() (agent.Options, func(), error) {
+func setup() (agent.Options, func(), *subagent.Manager, error) {
 	cfg, err := config.Load()
 	if err != nil {
-		return agent.Options{}, nil, err
+		return agent.Options{}, nil, nil, err
 	}
 	key := cfg.APIKey()
 	if key == "" {
-		return agent.Options{}, nil, fmt.Errorf(
+		return agent.Options{}, nil, nil, fmt.Errorf(
 			"API key empty: set $%s", cfg.Model.APIKeyEnv)
 	}
 	p := platform.New()
@@ -140,7 +143,7 @@ func setup() (agent.Options, func(), error) {
 	if cfg.Logging.Decisions {
 		dl, err = decision.Open(platform.ConfigDir(home) + "/logs")
 		if err != nil {
-			return agent.Options{}, nil, err
+			return agent.Options{}, nil, nil, err
 		}
 	}
 
@@ -148,19 +151,20 @@ func setup() (agent.Options, func(), error) {
 	reg := tool.NewRegistry()
 	for _, t := range []tool.Tool{tool.ReadFile{}, &tool.WriteFile{}, &tool.EditFile{}, tool.ListDir{}, shell} {
 		if err := reg.Register(t); err != nil {
-			return agent.Options{}, nil, err
+			return agent.Options{}, nil, nil, err
 		}
 	}
 
 	// Self-evolution: layout + auto-commit store + evolution tools.
 	st, err := openStore()
 	if err != nil {
-		return agent.Options{}, nil, err
+		return agent.Options{}, nil, nil, err
 	}
 	// Dangerous actions (rm -rf, git push --force, locks.yaml writes)
 	// ask the human at the terminal; the model can never self-approve.
 	reg.SetConfirmer(confirmFromStdin)
 	sessionID := time.Now().UTC().Format("20060102-150405")
+	fmt.Println("session id:", sessionID)
 	// Transaction-level backstop: any tool mutating protected files
 	// (including run_shell tricks) gets rolled back and logged.
 	gd := &guard.Guard{Root: st.Dir, St: st}
@@ -168,12 +172,56 @@ func setup() (agent.Options, func(), error) {
 	// Inline & spill: oversized tool outputs go to disk, not context.
 	sp, err := spill.New(st.Dir, sessionID, 0)
 	if err != nil {
-		return agent.Options{}, nil, err
+		return agent.Options{}, nil, nil, err
 	}
 	tool.SetSpillReader(func(ref string) (string, error) { return sp.Read(ref) })
 	_ = spill.CleanupSession(st.Dir, sessionID)
+	// Main conversation log: the single source of truth for what the
+	// model saw (rebuild + future --resume read back from it).
+	sessLog, err := sessionlog.Open(platform.ConfigDir(home)+"/sessions", sessionID)
+	if err != nil {
+		return agent.Options{}, nil, nil, err
+	}
 	if err := reg.Register(agent.TodoTool{Dir: sp.Dir}); err != nil {
-		return agent.Options{}, nil, err
+		return agent.Options{}, nil, nil, err
+	}
+
+	// P2a: sub-agent manager + agent_* tools. Agents are loaded (and
+	// built-ins seeded) from ~/.owltide/agents. Tool whitelists are
+	// validated against the registry so a typo in agents/*.md fails
+	// loudly at startup instead of at spawn time.
+	if err := agents.SeedBuiltins(st.Dir); err != nil {
+		return agent.Options{}, nil, nil, err
+	}
+	knownTools := map[string]bool{}
+	for _, d := range reg.Definitions() {
+		knownTools[d.Function.Name] = true
+	}
+	roleDefs, err := agents.Load(st.Dir, knownTools)
+	if err != nil {
+		return agent.Options{}, nil, nil, err
+	}
+	mgr, err := subagent.NewManager(subagent.ManagerOpts{
+		Config: cfg, Client: model.NewClient(cfg.Model.BaseURL, key, nil),
+		BaseReg: reg, Agents: roleDefs, Guard: gd, Spill: sp,
+		Decisions: dl, SessionID: sessionID, WorkDir: workDir,
+		TodoDir: sp.Dir, Loop: agent.LoopConfig{}, DecisionsOn: cfg.Logging.Decisions,
+		Confirm:      confirmFromStdin,
+		SessLog:      sessLog,
+		SubLogDir:    platform.ConfigDir(home) + "/logs/sub",
+		EventsLogDir: platform.ConfigDir(home) + "/logs",
+		Events: func(event string, fields map[string]any) {
+			// Audit sink: append one JSON line to logs/subagents.jsonl.
+			subagent.AppendEvent(platform.ConfigDir(home)+"/logs", event, fields)
+		},
+	})
+	if err != nil {
+		return agent.Options{}, nil, nil, err
+	}
+	for _, t := range mgr.ManagerTools() {
+		if err := reg.Register(t); err != nil {
+			return agent.Options{}, nil, nil, err
+		}
 	}
 	known := map[string]bool{}
 	for _, d := range reg.Definitions() {
@@ -192,12 +240,13 @@ func setup() (agent.Options, func(), error) {
 		KnownToolsSet: known,
 	}
 	if err := evolve.RegisterAll(reg, env); err != nil {
-		return agent.Options{}, nil, err
+		return agent.Options{}, nil, nil, err
 	}
 
-	cleanup := func() {}
+	cleanup := func() { _ = sessLog.Close() }
 	if dl != nil {
-		cleanup = func() { _ = dl.Close() }
+		prev := cleanup
+		cleanup = func() { prev(); _ = dl.Close() }
 	}
 
 	return agent.Options{
@@ -210,7 +259,8 @@ func setup() (agent.Options, func(), error) {
 		Guard:     gd,
 		Spill:     sp,
 		TodoDir:   sp.Dir,
-	}, cleanup, nil
+		SessLog:   sessLog,
+	}, cleanup, mgr, nil
 }
 
 // withSignal cancels the context on Ctrl-C.
@@ -226,13 +276,14 @@ func withSignal() (context.Context, func()) {
 }
 
 func runChat() {
-	opts, cleanup, err := setup()
+	opts, cleanup, mgr, err := setup()
 	must(err)
 	defer cleanup()
 	ctx, stop := withSignal()
 	defer stop()
 
 	a := agent.New(opts)
+	mgr.SetParent(a)
 	sc := bufio.NewScanner(os.Stdin)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
@@ -259,7 +310,7 @@ func runChat() {
 }
 
 func runOneShot(task string) {
-	opts, cleanup, err := setup()
+	opts, cleanup, mgr, err := setup()
 	must(err)
 	defer cleanup()
 	ctx, stop := withSignal()
@@ -267,6 +318,7 @@ func runOneShot(task string) {
 
 	opts.OnDelta = func(s string) { fmt.Print(s) }
 	a := agent.New(opts)
+	mgr.SetParent(a)
 	_, err = a.Run(ctx, task)
 	fmt.Println()
 	if err != nil {

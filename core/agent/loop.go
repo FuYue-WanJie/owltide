@@ -179,15 +179,16 @@ var loopReminder = "System: you are repeating the same tool call with the same r
 // injectRestate appends the todo restatement to the messages sent to
 // the model (a view, never persisted into history).
 func (a *Agent) viewForModel() []model.Message {
-	if a.todo == nil {
-		return a.messages
+	notices := a.takeNotices()
+	out := a.messages
+	if a.todo != nil {
+		if r := a.todo.restate(); r != "" {
+			out = append(append([]model.Message{}, out...),
+				model.Message{Role: model.RoleUser, Content: r})
+		}
 	}
-	r := a.todo.restate()
-	if r == "" {
-		return a.messages
+	for _, n := range notices {
+		out = append(out, n)
 	}
-	out := make([]model.Message, 0, len(a.messages)+1)
-	out = append(out, a.messages...)
-	out = append(out, model.Message{Role: model.RoleUser, Content: r})
 	return out
 }

@@ -125,3 +125,10 @@ cmd/owltide/  CLI 入口（chat 交互 / run 一次性）
   1. 稳定前缀 `9b30fd9`：前缀=system 消息+按注册序的工具定义（结构体 JSON，字段序确定、无 map、无时间戳/随机数）；会话中途不增删工具（FilterRegistry 只在会话创建用）；prefix_hash + cached_tokens（prompt_tokens_details.cached_tokens）进决策日志 v2（v1 字段不动）；owltide changes 尾部显示缓存命中率与前缀稳定性；TestStablePrefixBytes 验证同会话两轮前缀哈希一致
   2. Inline & Spill `e57a1aa`：core/spill——单结果默认 8KB 上限（可配），超出全文写入 ~/.owltide/spill/<session>/（不进 git、写入前 sk-/Bearer/ghp_/token= 等密钥打码），上下文留头 40 行+尾 10 行+总行数/字节+spill id；read_file 支持 spill:<id>[:start-end] 续读（sha256 锚定不受影响——仍按原文件算）；报错结果同样截断但保留结尾；spill 目录 32MB 上限按会话清理。测试：大输出截断可完整取回、小输出原样、密钥不落盘、跨会话清理、read_file 集成
   3. 目标复述与死循环检测 `dfc1687`：todo 工具写 <session dir>/todo.md；每轮注入 ≤500 字节的 [CURRENT GOAL] 到上下文末尾（视图层，不碰前缀不进历史）；死循环签名=sha256(工具名+规范化输入+输出)，滑窗 10 步同签名 ≥5 次先注入提醒，再犯按预算截停流程结束并记 decisions.jsonl（"loop stop: repeated identical tool call"）。测试：假模型先提醒后终止+日志记录、正常重试（输出不同）不误报、restate 追加不碰前缀
+
+- [2026-11-07] 0d58c60 复核三项（各自提交）：
+  1. `7d10a6d` 动态词危险范围收窄：命令名不可静态求值→危险；风险命令集（rm/find/git/dd/chmod/chown/mkfs*/sh 系/eval/xargs/sudo 系/env/cp/mv/ln/truncate/shred/关机系/mount/fdisk/kill 系/chattr/setfacl/tee）+ 参数动态→危险；其他命令动态参数放行（$(...) 子命令仍递归检查）；动态重定向目标（> $F）→危险。危险侧 $X -rf、rm -rf $TARGET、rm $(find /)、find $DIR -delete、git push $REMOTE --force 全命中；安全侧新增 go test $(go list ./...)、cd "$HOME"、echo $PATH、ls $DIR、cat ${CONFIG_FILE}、echo $(date)
+  2. `cf9bae0` 复述消息加 [AUTO — not a new user message] 前缀 + system prompt 一句说明（固定前缀一部分，一次改定不破缓存）；清 loop.go 死代码 var _ = sort.Strings
+  3. `b664008` cached_reported 贯通（Usage→decision v2→changes）：端点不返回 prompt_tokens_details 时显示「未上报」而非 0%
+  - 真实会话缓存测试（ltzy nemotron-3.5，chat 两轮建/改 notes.md）：两轮 prefix_hash 完全一致（e9af9f157d9ed906…，prefix stable: true）；端点上报 cached_tokens 字段但两轮均 0（该端点对此模型不做前缀缓存）；changes 尾行「cache: 2 turns, 0.0% prompt tokens served from provider cache (prefix stable: true)」
+  - Go 升级 go.mod → 1.26.10（工具链验证 + 全量测试 8 包绿 + vet 干净）；govulncheck ./... = No vulnerabilities found

@@ -60,6 +60,9 @@ type Record struct {
 	PrefixHash string `json:"prefix_hash,omitempty"`
 	// CachedTokens is the provider-reported cached prefix length.
 	CachedTokens int `json:"cached_tokens,omitempty"`
+	// CachedReported is true when the provider returned cache details
+	// at all; false means the endpoint never reports cached_tokens.
+	CachedReported bool `json:"cached_reported,omitempty"`
 }
 
 // Outcome values.

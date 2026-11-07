@@ -151,10 +151,11 @@ func pathsForLockID(root, id string) []string {
 
 // CacheStats summarizes provider prompt-cache hits from decisions.
 type CacheStats struct {
-	Turns        int
-	CachedTokens int
-	PromptTokens int
-	PrefixStable bool // all turns share one prefix hash
+	Turns          int
+	CachedTokens   int
+	PromptTokens   int
+	PrefixStable   bool // all turns share one prefix hash
+	CachedReported bool // any turn saw provider cache details
 }
 
 // CacheHitRate is CachedTokens / PromptTokens, 0 when no data.
@@ -187,10 +188,11 @@ func ReadCacheStats(root string) (CacheStats, error) {
 		}
 		for _, line := range strings.Split(string(data), "\n") {
 			var rec struct {
-				PromptTokens int    `json:"prompt_tokens"`
-				CachedTokens int    `json:"cached_tokens"`
-				PrefixHash   string `json:"prefix_hash"`
-				SchemaV2     bool   `json:"schema_v2"`
+				PromptTokens   int    `json:"prompt_tokens"`
+				CachedTokens   int    `json:"cached_tokens"`
+				PrefixHash     string `json:"prefix_hash"`
+				SchemaV2       bool   `json:"schema_v2"`
+				CachedReported bool   `json:"cached_reported"`
 			}
 			if json.Unmarshal([]byte(line), &rec) != nil || !rec.SchemaV2 {
 				continue
@@ -198,6 +200,9 @@ func ReadCacheStats(root string) (CacheStats, error) {
 			cs.Turns++
 			cs.PromptTokens += rec.PromptTokens
 			cs.CachedTokens += rec.CachedTokens
+			if rec.CachedReported {
+				cs.CachedReported = true
+			}
 			if rec.PrefixHash != "" {
 				prefixes[rec.PrefixHash] = true
 			}
@@ -236,8 +241,13 @@ func ChangesReport(st *store.Store, since time.Duration) (string, error) {
 		b.WriteString("no changes in the period\n")
 	}
 	if cs, err := ReadCacheStats(st.Dir); err == nil && cs.Turns > 0 {
-		fmt.Fprintf(&b, "\ncache: %d turns, %.1f%% prompt tokens served from provider cache (prefix stable: %v)\n",
-			cs.Turns, cs.CacheHitRate()*100, cs.PrefixStable)
+		if cs.CachedReported {
+			fmt.Fprintf(&b, "\ncache: %d turns, %.1f%% prompt tokens served from provider cache (prefix stable: %v)\n",
+				cs.Turns, cs.CacheHitRate()*100, cs.PrefixStable)
+		} else {
+			fmt.Fprintf(&b, "\ncache: %d turns, 未上报 (endpoint did not report cached_tokens; prefix stable: %v)\n",
+				cs.Turns, cs.PrefixStable)
+		}
 	}
 	return b.String(), nil
 }

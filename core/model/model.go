@@ -50,6 +50,9 @@ type Usage struct {
 	// CachedTokens is the prefix served from the provider's cache
 	// (prompt_tokens_details.cached_tokens when present).
 	CachedTokens int `json:"cached_tokens,omitempty"`
+	// CachedReported is true when the provider returned
+	// prompt_tokens_details at all (0 may still be a real miss).
+	CachedReported bool `json:"-"`
 }
 
 // Total returns the combined token count.
@@ -174,6 +177,7 @@ func (c *Client) Stream(ctx context.Context, req Request, onDelta func(StreamRes
 			usage.CompletionTokens = chunk.Usage.CompletionTokens
 			if chunk.Usage.Details != nil {
 				usage.CachedTokens = chunk.Usage.Details.CachedTokens
+				usage.CachedReported = true
 			}
 		}
 		for _, choice := range chunk.Choices {

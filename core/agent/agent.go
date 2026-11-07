@@ -44,12 +44,13 @@ type Options struct {
 
 // Agent runs the loop.
 type Agent struct {
-	opts       Options
-	messages   []model.Message
-	tokens     int
-	turn       int
-	lastCached int
-	fatalGuard bool // restore failure: stop the loop
+	opts               Options
+	messages           []model.Message
+	tokens             int
+	turn               int
+	lastCached         int
+	lastCachedReported bool
+	fatalGuard         bool // restore failure: stop the loop
 	// lastSnap is the most recent trusted protected-set snapshot.
 	lastSnap   guard.Snapshot
 	prefixHash string // stable request prefix (system + tools)
@@ -166,6 +167,7 @@ func (a *Agent) Run(ctx context.Context, userText string) (string, error) {
 		msg, usage, err := a.step(ctx)
 		a.tokens += usage.Total()
 		a.lastCached = usage.CachedTokens
+		a.lastCachedReported = usage.CachedReported
 		if err != nil {
 			runErr = err
 			break
@@ -356,6 +358,7 @@ func (a *Agent) logTurn(start time.Time, input string, tools []decision.ToolReco
 		SchemaV2:        true,
 		PrefixHash:      a.prefixHash,
 		CachedTokens:    a.lastCached,
+		CachedReported:  a.lastCachedReported,
 	}
 	_ = a.opts.Decisions.Log(rec)
 }

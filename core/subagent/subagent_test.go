@@ -98,7 +98,9 @@ func newFixture(t *testing.T, script func(n int, req model.Request) string, o fx
 		t.Fatal(err)
 	}
 	st.EnsureInit()
-	agents.SeedBuiltins(cfgDir)
+	if _, err := agents.SeedBuiltins(cfgDir); err != nil {
+		t.Fatal(err)
+	}
 	defs, err := agents.Load(cfgDir, nil)
 	if err != nil {
 		t.Fatal(err)

@@ -310,8 +310,12 @@ func setup(resumeID string) (agent.Options, func(), *subagent.Manager, error) {
 	// built-ins seeded) from ~/.owltide/agents. Tool whitelists are
 	// validated against the registry so a typo in agents/*.md fails
 	// loudly at startup instead of at spawn time.
-	if err := agents.SeedBuiltins(st.Dir); err != nil {
+	seedNotes, err := agents.SeedBuiltins(st.Dir)
+	if err != nil {
 		return agent.Options{}, nil, nil, err
+	}
+	for _, note := range seedNotes {
+		fmt.Fprintln(os.Stderr, "note: builtin role", note)
 	}
 	knownTools := map[string]bool{}
 	for _, d := range reg.Definitions() {

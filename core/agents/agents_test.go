@@ -113,3 +113,73 @@ func TestFilterRegistryWhitelist(t *testing.T) {
 		t.Fatal("unknown whitelist tool must fail")
 	}
 }
+
+// TestSeedBuiltinsVersionUpgrade: a v1 (pre-versioning) untouched role
+// file is upgraded in place; a user-edited file is left alone with a
+// note; a current-version file is not rewritten.
+func TestSeedBuiltinsVersionUpgrade(t *testing.T) {
+	root := t.TempDir()
+
+	// 1. Fresh seed: missing files are written with the current version.
+	if _, err := SeedBuiltins(root); err != nil {
+		t.Fatal(err)
+	}
+	explorePath := filepath.Join(Dir(root), "explore.md")
+	data, _ := os.ReadFile(explorePath)
+	if !strings.Contains(string(data), "builtin_version: 2") {
+		t.Fatalf("fresh seed must stamp builtin_version: 2:\n%s", data)
+	}
+
+	// 2. Untouched v1 file (hash matches a shipped older version):
+	// upgraded to the current render.
+	v1Explore := Def{
+		Name: "explore", Description: "Read-only scout: files and directory listings plus a parser-gated read-only shell. Parallelizable.",
+		Model: "inherit", Readonly: true,
+		SystemPrompt: "You are the OwlTide scout. Answer with facts you verified by reading " +
+			"files and running read-only commands. Never speculate; quote what you saw. " +
+			"Finish with a compact findings summary.",
+		Tools:          []string{"read_file", "list_dir", "run_shell"},
+		Budget:         Budget{MaxTurns: 10, MaxTokens: 100000, ToolTimeoutSec: 30},
+		Builtin:        true,
+		BuiltinVersion: 0, // pre-versioning files carry none
+	}
+	if err := os.WriteFile(explorePath, []byte(v1Explore.render()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	notes, err := SeedBuiltins(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ = os.ReadFile(explorePath)
+	if !strings.Contains(string(data), "Work inside the path the task gives") {
+		t.Fatalf("v1 untouched file must be upgraded to v2 prompt:\n%s", data)
+	}
+	for _, n := range notes {
+		if strings.Contains(n, "explore") {
+			t.Fatalf("upgraded file must not produce a user-edit note: %v", notes)
+		}
+	}
+
+	// 3. User-edited file (content matches no shipped version): untouched.
+	edited := strings.Replace(string(data), "OwlTide scout", "OwlTide scout (customized)", 1)
+	if err := os.WriteFile(explorePath, []byte(edited), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	notes, err = SeedBuiltins(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ = os.ReadFile(explorePath)
+	if !strings.Contains(string(data), "customized") {
+		t.Fatalf("user-edited file must not be overwritten:\n%s", data)
+	}
+	found := false
+	for _, n := range notes {
+		if strings.Contains(n, "explore") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("edited file must produce a note: %v", notes)
+	}
+}

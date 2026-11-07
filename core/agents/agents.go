@@ -30,6 +30,10 @@ type Def struct {
 	// not delete; self-evolution may never widen their tool whitelist
 	// or drop their readonly flag.
 	Builtin bool `yaml:"builtin,omitempty"`
+	// BuiltinVersion records which shipped builtin generation a seeded
+	// file carries; SeedBuiltins uses content hashes to upgrade
+	// untouched files, so this field is informational.
+	BuiltinVersion int `yaml:"builtin_version,omitempty"`
 	// Readonly roles receive only tools declared as read-only at
 	// registration; any tool lacking an explicit read-only declaration
 	// is treated as writing and refused system-side.

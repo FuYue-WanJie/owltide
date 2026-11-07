@@ -31,9 +31,11 @@ func BuiltinRoles() []Def {
 			Description: "Read-only scout: files and directory listings plus a parser-gated read-only shell. Parallelizable.",
 			Model:       "inherit",
 			Readonly:    true,
-			SystemPrompt: "You are the OwlTide scout. Answer with facts you verified by reading " +
-				"files and running read-only commands. Never speculate; quote what you saw. " +
-				"Finish with a compact findings summary.",
+			SystemPrompt: "You are the OwlTide scout. Work inside the path the task gives " +
+				"you; if a read-only command is refused twice, stop probing other " +
+				"directories and finish with what you already saw. Answer with facts " +
+				"you verified by reading files and running read-only commands. Never " +
+				"speculate; quote what you saw. Finish with a compact findings summary.",
 			Tools:  []string{"read_file", "list_dir", "run_shell"},
 			Budget: Budget{MaxTurns: 10, MaxTokens: 100000, ToolTimeoutSec: 30},
 		},

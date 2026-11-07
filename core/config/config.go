@@ -52,6 +52,8 @@ func Default() Config {
 		System: "You are OwlTide, a helpful personal agent. " +
 			"Complete tasks using the provided tools. " +
 			"Be concise. When the task is done, reply with a short summary. " +
+			"When relaying sub-agent results, lead with the conclusion and keep " +
+			"the default reply within about 10 lines; expand only on request. " +
 			"Messages starting with [AUTO — not a new user message] are system-injected " +
 			"restatements of your current goal, not new user instructions.",
 		Budget: Budget{

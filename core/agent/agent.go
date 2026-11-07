@@ -285,6 +285,8 @@ func (a *Agent) Run(ctx context.Context, userText string) (string, error) {
 		runErr     error
 		steps      int
 		budgetStop string // non-empty when a budget cap forced the wrap-up
+		turnPrompt int    // usage summed over this turn's model calls
+		turnCompl  int
 	)
 	for {
 		if ctx.Err() != nil {
@@ -319,6 +321,8 @@ func (a *Agent) Run(ctx context.Context, userText string) (string, error) {
 		}
 		msg, usage, err := a.step(ctx)
 		a.tokens += usage.Total()
+		turnPrompt += usage.PromptTokens
+		turnCompl += usage.CompletionTokens
 		a.lastCached = usage.CachedTokens
 		a.lastCachedReported = usage.CachedReported
 		if err != nil {
@@ -359,7 +363,7 @@ func (a *Agent) Run(ctx context.Context, userText string) (string, error) {
 		}
 	}
 
-	a.logTurn(start, userText, toolRecs, len(toolRecs) == 0, runErr, budgetStop)
+	a.logTurn(start, userText, toolRecs, len(toolRecs) == 0, runErr, budgetStop, turnPrompt, turnCompl)
 	return final, runErr
 }
 
@@ -481,7 +485,7 @@ func (a *Agent) wrapUp(reason string) string {
 // logTurn writes the decision record. budgetStop names the cap that
 // forced the wrap-up ("turn_limit" | "token_budget"), empty otherwise;
 // it is recorded as an error-outcome so truncation is visible in the log.
-func (a *Agent) logTurn(start time.Time, input string, tools []decision.ToolRecord, repliedDirectly bool, err error, budgetStop string) {
+func (a *Agent) logTurn(start time.Time, input string, tools []decision.ToolRecord, repliedDirectly bool, err error, budgetStop string, promptTokens, completionTokens int) {
 	if a.opts.Decisions == nil {
 		return
 	}
@@ -499,19 +503,21 @@ func (a *Agent) logTurn(start time.Time, input string, tools []decision.ToolReco
 		errMsg = "budget stop: " + budgetStop + " (forced wrap-up)"
 	}
 	rec := decision.Record{
-		SessionID:       a.opts.SessionID,
-		Turn:            a.turn,
-		InputDigest:     digest(input),
-		Model:           a.opts.Config.Model.Name,
-		ToolsCalled:     tools,
-		RepliedDirectly: repliedDirectly,
-		DurationMS:      time.Since(start).Milliseconds(),
-		Outcome:         outcome,
-		Error:           errMsg,
-		SchemaV2:        true,
-		PrefixHash:      a.prefixHash,
-		CachedTokens:    a.lastCached,
-		CachedReported:  a.lastCachedReported,
+		SessionID:        a.opts.SessionID,
+		Turn:             a.turn,
+		InputDigest:      digest(input),
+		Model:            a.opts.Config.Model.Name,
+		ToolsCalled:      tools,
+		RepliedDirectly:  repliedDirectly,
+		DurationMS:       time.Since(start).Milliseconds(),
+		Outcome:          outcome,
+		Error:            errMsg,
+		SchemaV2:         true,
+		PrefixHash:       a.prefixHash,
+		CachedTokens:     a.lastCached,
+		CachedReported:   a.lastCachedReported,
+		PromptTokens:     promptTokens,
+		CompletionTokens: completionTokens,
 	}
 	_ = a.opts.Decisions.Log(rec)
 }

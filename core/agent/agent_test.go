@@ -648,3 +648,52 @@ func TestResumeRepairsDanglingToolCalls(t *testing.T) {
 		t.Fatalf("second repair pass must be a no-op, repaired %d", n2)
 	}
 }
+
+// TestTurnTokensRecorded: replay the SSE stream recorded from a real
+// endpoint (testdata/recorded_stream_usage.sse, prompt=2393/completion=49)
+// through one agent turn and assert the decision record carries both
+// token fields verbatim.
+func TestTurnTokensRecorded(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "recorded_stream_usage.sse"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write(raw)
+	}))
+	t.Cleanup(srv.Close)
+
+	tmp := t.TempDir()
+	dl, err := decision.Open(filepath.Join(tmp, "logs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { dl.Close() })
+
+	cfg := config.Default()
+	cfg.Model.Name = "nvidia/nemotron-3.5-super-vl-120b-a12b"
+	cfg.Model.BaseURL = "https://x"
+	reg := tool.NewRegistry()
+	opts := agentOptions(cfg, model.NewClient(srv.URL, "k", nil), reg, dl)
+	a := New(opts)
+	final, err := a.Run(context.Background(), "reply ok")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(final) == "" {
+		t.Fatal("empty final reply")
+	}
+
+	logData, err := os.ReadFile(filepath.Join(tmp, "logs", "decisions.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rec decision.Record
+	if err := json.Unmarshal([]byte(strings.SplitN(strings.TrimSpace(string(logData)), "\n", 2)[0]), &rec); err != nil {
+		t.Fatal(err)
+	}
+	if rec.PromptTokens != 2393 || rec.CompletionTokens != 49 {
+		t.Fatalf("decision tokens mismatch: prompt=%d completion=%d, want 2393/49", rec.PromptTokens, rec.CompletionTokens)
+	}
+}

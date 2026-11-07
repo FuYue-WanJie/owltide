@@ -325,6 +325,7 @@ func (t agentStart) startParallel(ctx context.Context, a startArgs) (string, err
 		m.event("rejected", map[string]any{"reason": "parent budget exhausted (parallel total " + itoa(total) + ")"})
 		return "", fmt.Errorf("parent budget exhausted; parallel batch needs %d tokens", total)
 	}
+	m.event("budget", map[string]any{"op": "reserved", "tokens": total, "count": len(specs)})
 	release := func() {
 		if p := m.parent(); p != nil {
 			p.ReleaseBudget(total)
@@ -410,10 +411,11 @@ func (t agentStart) startChain(ctx context.Context, a startArgs) (string, error)
 		m.event("rejected", map[string]any{"reason": "parent budget exhausted (chain total " + itoa(total) + ")"})
 		return "", fmt.Errorf("parent budget exhausted; chain needs %d tokens", total)
 	}
+	chainID := newID()
+	m.event("budget", map[string]any{"op": "reserved", "tokens": total, "chain": chainID})
 	// Registered immediately after the reservation succeeds: every
 	// return path below (step failure, panic, success) releases the
 	// unused remainder.
-	chainID := newID()
 	defer func() {
 		if p := m.parent(); p != nil {
 			p.ReleaseBudget(total)

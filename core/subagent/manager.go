@@ -49,6 +49,10 @@ const (
 	StateDone    = "done"
 	StateStopped = "stopped"
 	StateFailed  = "failed"
+	// StateInterrupted marks a session that was still running when the
+	// process crashed; it is reported to the main agent on restart
+	// (no result) and delivered exactly once like any other result.
+	StateInterrupted = "interrupted"
 )
 
 // ManagerOpts wires the manager to the parent's world.
@@ -232,7 +236,10 @@ func readEvents(logDir string) []subEvent {
 // the audit log, with summaries recovered from the per-sub transcripts
 // (sub/<id>/messages.jsonl), so SetParent's delivery pass re-delivers
 // exactly the results a restart lost. Sessions still running at crash
-// time are skipped: a half-run cannot be resumed safely.
+// time are NOT silently dropped: they are marked interrupted and
+// reported to the main agent through the same delivery path (no
+// result), with the write token returned to main — a new process holds
+// no budget reservation for them, so there is nothing to refund there.
 func (m *Manager) recoverFinished() {
 	if m.opts.EventsLogDir == "" {
 		return
@@ -240,6 +247,7 @@ func (m *Manager) recoverFinished() {
 	type st struct {
 		role, state string
 		delivered   bool
+		dispatched  bool
 	}
 	byID := map[string]*st{}
 	for _, e := range readEvents(m.opts.EventsLogDir) {
@@ -249,7 +257,15 @@ func (m *Manager) recoverFinished() {
 			byID[e.ID] = s
 		}
 		switch e.Event {
-		case "dispatched", "finished":
+		case "dispatched":
+			// dispatched carries role+mode only, no state: its bare
+			// presence means the session existed; the terminal state
+			// comes from a later finished event (absent => interrupted).
+			if e.Role != "" {
+				s.role = e.Role
+			}
+			s.dispatched = true
+		case "finished":
 			if e.Role != "" {
 				s.role = e.Role
 			}
@@ -262,21 +278,34 @@ func (m *Manager) recoverFinished() {
 	}
 	m.mu.Lock()
 	for id, s := range byID {
-		if s.delivered || id == "" {
-			continue
-		}
-		if s.state != StateDone && s.state != StateFailed {
+		if s.delivered || id == "" || !s.dispatched {
 			continue
 		}
 		if _, alive := m.sessions[id]; alive {
 			continue
 		}
-		m.sessions[id] = &Session{
-			ID:      id,
-			Role:    s.role,
-			Def:     m.opts.Agents[s.role],
-			State:   s.state,
-			Summary: m.subSummary(id, s.state),
+		switch s.state {
+		case StateDone, StateFailed:
+			m.sessions[id] = &Session{
+				ID:      id,
+				Role:    s.role,
+				Def:     m.opts.Agents[s.role],
+				State:   s.state,
+				Summary: m.subSummary(id, s.state),
+			}
+		case "":
+			// Dispatched but never finished: still running at crash
+			// time. The write token the crashed process transferred to
+			// this sub-agent dies with the process; make it explicit.
+			m.transfer("main")
+			m.sessions[id] = &Session{
+				ID:    id,
+				Role:  s.role,
+				Def:   m.opts.Agents[s.role],
+				State: StateInterrupted,
+				Summary: "子代理 " + id +
+					" 在重启时被中断，没有结果",
+			}
 		}
 	}
 	m.mu.Unlock()
@@ -311,7 +340,7 @@ func (m *Manager) reDeliverPending() {
 	m.mu.Lock()
 	var pending []*Session
 	for _, s := range m.sessions {
-		if (s.State == StateDone || s.State == StateFailed) && !s.Delivered {
+		if (s.State == StateDone || s.State == StateFailed || s.State == StateInterrupted) && !s.Delivered {
 			pending = append(pending, s)
 		}
 	}

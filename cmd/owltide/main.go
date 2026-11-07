@@ -279,6 +279,25 @@ func setup(resumeID string) (agent.Options, func(), *subagent.Manager, error) {
 	_ = spill.CleanupSession(st.Dir, sessionID)
 	// Main conversation log: the single source of truth for what the
 	// model saw (rebuild + future --resume read back from it).
+	// Session lock: one process per session id. A stale lock (its
+	// holder died) is taken over with a warning; a live one refuses.
+	lock, lockStale, err := sessionlog.LockSession(platform.ConfigDir(home)+"/sessions", sessionID)
+	if err != nil {
+		return agent.Options{}, nil, nil, err
+	}
+	if lockStale {
+		fmt.Fprintln(os.Stderr, "warning: previous process left a stale session lock; taking over")
+	}
+	if resumeID != "" {
+		// Torn tail from a crash must go before any new append, or the
+		// next record would glue onto the broken line.
+		if _, warn, err := sessionlog.RepairTornTail(
+			filepath.Join(platform.ConfigDir(home)+"/sessions", resumeID, "messages.jsonl")); err != nil {
+			return agent.Options{}, nil, nil, err
+		} else if warn != "" {
+			fmt.Fprintln(os.Stderr, "warning:", warn)
+		}
+	}
 	sessLog, err := sessionlog.Open(platform.ConfigDir(home)+"/sessions", sessionID)
 	if err != nil {
 		return agent.Options{}, nil, nil, err
@@ -344,7 +363,10 @@ func setup(resumeID string) (agent.Options, func(), *subagent.Manager, error) {
 		return agent.Options{}, nil, nil, err
 	}
 
-	cleanup := func() { _ = sessLog.Close() }
+	cleanup := func() {
+		_ = sessLog.Close()
+		_ = lock.Release()
+	}
 	if dl != nil {
 		prev := cleanup
 		cleanup = func() { prev(); _ = dl.Close() }
@@ -434,19 +456,21 @@ func runOneShot(resumeID, task string) {
 // previous run (see RebuildWithWarning). Empty resumeID is a no-op.
 // The order matters: restore first, then SetParent — recovered
 // sub-agent results append after the restored history, matching the
-// timeline of the crashed process.
+// timeline of the crashed process. Dangling tool calls (crash between
+// the call and its result) are repaired and the repairs persisted.
 func restoreSession(a *agent.Agent, resumeID string) {
 	if resumeID == "" {
 		return
 	}
-	msgs, warn, err := sessionlog.RebuildWithWarning(
+	msgs, _, err := sessionlog.RebuildWithWarning(
 		filepath.Join(sessionsDir(), resumeID, "messages.jsonl"))
 	must(err)
+	n, warn := a.RestoreHistoryRepaired(msgs)
 	if warn != "" {
 		fmt.Fprintln(os.Stderr, "warning:", warn)
 	}
-	a.RestoreHistory(msgs)
-	fmt.Printf("resumed session %s (%d messages)\n", resumeID, len(msgs))
+	fmt.Printf("resumed session %s (%d messages, %d tool calls repaired)\n",
+		resumeID, len(msgs), n)
 }
 
 // confirmFromStdin asks the user a yes/no question on the terminal.

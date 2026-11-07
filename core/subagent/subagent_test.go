@@ -990,3 +990,106 @@ func TestRecoverUndeliveredFromDisk(t *testing.T) {
 		t.Fatalf("second restart re-delivered: %d pairs", n)
 	}
 }
+
+// TestRunningSubagentReportedInterrupted: a sub-agent still running at
+// crash time is not silently dropped on restart — it is marked
+// interrupted, reported through the same agent_result delivery path
+// exactly once, and the write token is back with main (a fresh process
+// holds no reservation for it, so there is nothing to refund).
+func TestRunningSubagentReportedInterrupted(t *testing.T) {
+	f := newFixture(t, nil, fxOpts{})
+	id := "sub-interr1"
+	eventsDir := filepath.Join(f.cfgDir, "logs")
+	logPath := filepath.Join(f.root, "sessions", "main", "messages.jsonl")
+
+	AppendEvent(eventsDir, "dispatched", map[string]any{"id": id, "role": "general", "mode": "single"})
+	// No finished/delivered event: it was still running at crash time.
+	// (general is a write role, so the crashed process had transferred
+	// the write token to it.)
+
+	before := f.parent.RemainingTokens()
+	mgr2, err := NewManager(ManagerOpts{
+		Parent: f.parent, Config: f.m.opts.Config,
+		Client: f.m.opts.Client, BaseReg: f.baseReg,
+		Agents: f.agents, SessionID: "test2",
+		SessLog:      f.sessLog,
+		SubLogDir:    f.m.subLogDir,
+		EventsLogDir: eventsDir,
+		Events: func(event string, fields map[string]any) {
+			AppendEvent(eventsDir, event, fields)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr2.SetParent(f.parent)
+
+	// Write token back with main.
+	if mgr2.WriteGate().Held() {
+		t.Fatal("write token must be with main after interruption report")
+	}
+	// No budget was silently reserved (fresh process) and none leaked.
+	if after := f.parent.RemainingTokens(); after != before {
+		t.Fatalf("budget changed without any sub-agent running: %d -> %d", before, after)
+	}
+
+	// The interruption notice entered the session log exactly once,
+	// with the agent_result pair and the Chinese message from the spec.
+	msgs, _, err := sessionlog.RebuildWithWarning(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pairs := 0
+	for _, m := range msgs {
+		if m.Role == "assistant" && len(m.ToolCalls) > 0 && strings.Contains(m.ToolCalls[0].ID, id) {
+			pairs++
+		}
+	}
+	if pairs != 1 {
+		t.Fatalf("interruption notice must be delivered exactly once, got %d", pairs)
+	}
+	found := false
+	for _, m := range msgs {
+		if m.Role == "tool" && strings.Contains(m.Content, "在重启时被中断") &&
+			strings.Contains(m.Content, id) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("interruption message missing: %+v", msgs)
+	}
+	// agent_result on the interrupted session returns the reference
+	// only (already delivered).
+	tools := mgr2.ManagerTools()
+	rt := tools[4].(interface {
+		Call(context.Context, json.RawMessage) (string, error)
+	})
+	out, err := rt.Call(context.Background(), json.RawMessage(`{"id":"`+id+`"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "already delivered") {
+		t.Fatalf("interrupted result must not be re-delivered: %s", out)
+	}
+	// Delivered event persisted.
+	if !DeliveredIDs(eventsDir)[id] {
+		t.Fatal("delivered event missing for interrupted session")
+	}
+	// Second restart: nothing new.
+	mgr3, err := NewManager(ManagerOpts{
+		Parent: f.parent, Config: f.m.opts.Config,
+		Client: f.m.opts.Client, BaseReg: f.baseReg,
+		Agents: f.agents, SessionID: "test3",
+		SessLog:      f.sessLog,
+		SubLogDir:    f.m.subLogDir,
+		EventsLogDir: eventsDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr3.SetParent(f.parent)
+	msgs2, _, _ := sessionlog.RebuildWithWarning(logPath)
+	if got := len(msgs2); got != len(msgs) {
+		t.Fatalf("second restart must not add messages: %d -> %d", len(msgs), got)
+	}
+}

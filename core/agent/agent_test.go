@@ -562,3 +562,89 @@ func itoaN(n int) string {
 	}
 	return string(b)
 }
+
+// TestResumeRepairsDanglingToolCalls: a crash between an assistant
+// tool_calls message and its tool result leaves a dangling call that
+// providers reject on replay. RestoreHistoryRepaired appends a
+// synthetic tool result, persists it through the session log, and a
+// second repair pass finds nothing.
+func TestResumeRepairsDanglingToolCalls(t *testing.T) {
+	cfg := config.Default()
+	cfg.Model.Name = "m"
+	cfg.Model.BaseURL = "https://x"
+	reg := tool.NewRegistry()
+
+	root := t.TempDir()
+	log1, err := sessionlog.Open(root, "s1")
+	must(err)
+
+	// A crashed history: assistant issued two tool calls, only one
+	// result landed before the crash.
+	msgs := []model.Message{
+		{Role: model.RoleUser, Content: "run both"},
+		{Role: model.RoleAssistant, ToolCalls: []model.ToolCall{
+			{ID: "c1", Type: "function", Function: model.Function{Name: "read_file", Arguments: `{"path":"a"}`}},
+			{ID: "c2", Type: "function", Function: model.Function{Name: "list_dir", Arguments: `{}`}},
+		}},
+		{Role: model.RoleTool, ToolCallID: "c1", Name: "read_file", Content: "data"},
+		// c2 never got a result.
+	}
+	for _, m := range msgs {
+		must(log1.Append(m))
+	}
+	must(log1.Close())
+
+	rebuilt, warn, err := sessionlog.RebuildWithWarning(filepath.Join(root, "s1", "messages.jsonl"))
+	if err != nil || warn != "" {
+		t.Fatalf("rebuild: %v %q", err, warn)
+	}
+
+	log2, err := sessionlog.Open(root, "s1")
+	must(err)
+	defer log2.Close()
+	opts := agentOptions(cfg, nil, reg, nil)
+	opts.SessLog = log2
+	a := New(opts)
+	n, repairWarn := a.RestoreHistoryRepaired(rebuilt)
+	if n != 1 {
+		t.Fatalf("expected 1 repair, got %d (%q)", n, repairWarn)
+	}
+	if repairWarn == "" {
+		t.Fatal("repair warning missing")
+	}
+
+	// The model-visible view now has the repair after the result of c1.
+	// Replayed history must be provider-valid: every tool_call answered.
+	answering := map[string]bool{}
+	for _, m := range a.messages {
+		if m.Role == model.RoleTool && m.ToolCallID != "" {
+			answering[m.ToolCallID] = true
+		}
+	}
+	for _, m := range a.messages {
+		if m.Role == model.RoleAssistant {
+			for _, tc := range m.ToolCalls {
+				if !answering[tc.ID] {
+					t.Fatalf("tool call %s still dangling", tc.ID)
+				}
+			}
+		}
+	}
+	// The repair is persisted in the session log.
+	data, _ := os.ReadFile(filepath.Join(root, "s1", "messages.jsonl"))
+	if !strings.Contains(string(data), "interrupted by a restart") {
+		t.Fatalf("repair not persisted: %s", data)
+	}
+	if got := strings.Count(string(data), `"tool_call_id":"c2"`); got != 1 {
+		t.Fatalf("c2 repair must appear exactly once, got %d", got)
+	}
+
+	// A second pass over the repaired log finds nothing to repair.
+	again, _, err := sessionlog.RebuildWithWarning(filepath.Join(root, "s1", "messages.jsonl"))
+	must(err)
+	a2 := New(opts)
+	n2, _ := a2.RestoreHistoryRepaired(again)
+	if n2 != 0 {
+		t.Fatalf("second repair pass must be a no-op, repaired %d", n2)
+	}
+}

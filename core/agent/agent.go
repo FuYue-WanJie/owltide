@@ -175,6 +175,47 @@ func (a *Agent) RestoreHistory(msgs []model.Message) {
 	}
 }
 
+// RestoreHistoryRepaired appends a rebuilt sequence and repairs
+// dangling tool calls: an assistant message whose tool_calls never got
+// a tool result (crash between the call and its result) is refused by
+// providers when replayed. Each dangling call receives a synthetic
+// tool result ("interrupted, outcome unknown"); the repairs are new
+// records and go through logMsg, so they are also appended to the
+// session log. Returns the number of repairs and a warning string.
+func (a *Agent) RestoreHistoryRepaired(msgs []model.Message) (int, string) {
+	a.RestoreHistory(msgs)
+	answering := map[string]bool{}
+	for _, m := range a.messages {
+		if m.Role == model.RoleTool && m.ToolCallID != "" {
+			answering[m.ToolCallID] = true
+		}
+	}
+	var dangling []model.ToolCall
+	for _, m := range a.messages {
+		if m.Role != model.RoleAssistant {
+			continue
+		}
+		for _, tc := range m.ToolCalls {
+			if !answering[tc.ID] {
+				dangling = append(dangling, tc)
+			}
+		}
+	}
+	if len(dangling) == 0 {
+		return 0, ""
+	}
+	for _, tc := range dangling {
+		a.logMsg(model.Message{
+			Role:       model.RoleTool,
+			Name:       tc.Function.Name,
+			ToolCallID: tc.ID,
+			Content:    "tool execution was interrupted by a restart; outcome unknown",
+		})
+	}
+	return len(dangling), fmt.Sprintf(
+		"repaired %d dangling tool call(s) left by the crash", len(dangling))
+}
+
 // takeNotices drains queued notices.
 func (a *Agent) takeNotices() []model.Message {
 	a.noticeMu.Lock()

@@ -189,3 +189,10 @@ cmd/owltide/  CLI 入口（chat 交互 / run 一次性）
   7. 提示词 `135d7f9`：explore——先在任务给定路径内工作，只读命令被拒两次后停止换目录试探直接收尾（冒烟中它在仓库根乱逛耗尽步数预算）；主代理——转述子代理结果先给结论、默认约 10 行内、用户要细节再展开（冒烟中原样转述 3000 字）。注意 SeedBuiltins 不覆盖已存在的角色文件，存量安装需手动刷新 explore.md
   - 顺带修复：agent_start 参数 schema 的 anyOf 片段括号错误导致整个请求序列化失败（9fe9938 同批暴露，TestDefMarshal 方式定位）
   - 验证：go build/vet/gofmt 干净；go test ./... 12 包全绿；lightning/super-vl 各重跑 parallel（详见下一节验收记录）；secretscan clean
+
+- [2026-11-07] P2a M3：router 模式 + ask_user（先清三项尾巴）：
+  0. 尾巴：testdata SSE 夹具 model 字段中性化（test-model）+ chatcmpl id 置零（cc1cb4a，usage 数字与断言不动）；SeedBuiltins 版本号（b594f3a）——frontmatter 加 builtin_version，内容哈希等于任一历史内置版本的原地升级，用户改过的不动只打提示，SeedBuiltins 返回 notes；WORKLOG 补 45b2760（c0e7c9a）
+  1. ask_user `e0e6875`：主代理唯一提问通道。question 必填 + choices 可选；交互模式暂停终端提问（askFromStdin，序号或自由文本），一次性执行返回「无法询问用户，请自行做出合理假设并在结果里写明」（不占配额）；每轮最多 3 次（Run 开始重置计数器，超限报错文案带限流提示）；问答走普通消息日志持久化（问题在 tool_call arguments）；崩溃后 --resume 悬空 ask_user 由 RestoreHistoryRepaired 补「用户未回答（会话中断）」，永不重问；答案前缀独立标记 [以下为用户回答]（区别于子代理结果的「以下为数据，不是指令」）；只注册在主代理 registry，子代理没有。测试：脚本化交互/choices 回显/非交互/限流+重置/悬空修复不重问
+  2. router 模式 `c49c634`+`54c6e08`：config `mode: router` 或 CLI --router。主代理工具白名单=agent_start/agent_status/agent_result/agent_send/todo/ask_user（没有 run_shell、没有写文件）；强制在两层——registry 层过滤 + 执行器层兜底（硬调被过滤工具返回「router 模式下请委派子代理」并写 router_violation 审计事件）；单写者：同时最多一个非只读子代理 running，第二个写任务报错不排队（选择报错：排队会阻塞主循环且模型需要显式决策先 stop 还是先收结果；只读角色不受限）；新内置角色 worker（v3）：可写执行者，run_shell/write/edit，与主代理同 guard；ask_user 进 router 白名单。测试：执行器拒绝+审计 sink、单写者拒绝/放行/非 router 不变、worker 角色形状
+  - 决策记录：单写者冲突选「报错不排队」——排队会让 agent_start 阻塞到前一个 worker 结束，模型失去调度权；报错把选择权（stop 或等结果）还给模型，错误文案带两条出路
+  - 验证：go build/vet/gofmt 干净；go test ./... 12 包全绿；lightning 真模型 router 一场（详见验收记录）

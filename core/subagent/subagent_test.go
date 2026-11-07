@@ -1477,7 +1477,10 @@ func TestLoopStopReleasesSubagentReservation(t *testing.T) {
 // refused while one is running (error, not queued); read-only roles
 // are unaffected; outside router mode the refusal does not apply.
 func TestRouterSingleWriter(t *testing.T) {
+	// Spawned sub-agents hit the model server; give them a script.
+	srv := fakeLLM2(t, func(int, model.Request) string { return textReply("ok") })
 	f := newFixture(t, nil, fxOpts{})
+	f.m.opts.Client = model.NewClient(srv.URL, "k", nil)
 	f.m.opts.RouterMode = true
 
 	def := f.agents["general"] // writer role

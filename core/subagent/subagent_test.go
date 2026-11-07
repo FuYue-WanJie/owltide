@@ -1359,3 +1359,42 @@ func readLines(path string) chan string {
 	}()
 	return ch
 }
+
+// TestSendRefusesDeliveredSession: a finished sub-agent whose result
+// was already delivered is not re-runnable — agent_send refuses
+// without reserving budget or re-running, and points at agent_start.
+func TestSendRefusesDeliveredSession(t *testing.T) {
+	f := newFixture(t, nil, fxOpts{})
+	tools := f.m.ManagerTools()
+	sendT := tools[2].(interface {
+		Call(context.Context, json.RawMessage) (string, error)
+	})
+	s := &Session{
+		ID: "sub-dlv-refuse", Role: "explore",
+		Def: f.agents["explore"], Task: "t", Mode: ModeSingle,
+		State: StateDone, Summary: "OLD", Delivered: true,
+	}
+	f.m.mu.Lock()
+	f.m.sessions[s.ID] = s
+	f.m.mu.Unlock()
+
+	before := f.parent.RemainingTokens()
+	_, err := sendT.Call(context.Background(), json.RawMessage(
+		`{"id":"sub-dlv-refuse","message":"continue"}`))
+	if err == nil {
+		t.Fatal("agent_send must refuse a delivered session")
+	}
+	if !strings.Contains(err.Error(), "agent_start 新开") {
+		t.Fatalf("refusal must point at agent_start: %v", err)
+	}
+	if after := f.parent.RemainingTokens(); after != before {
+		t.Fatalf("budget must not be reserved on refusal: %d -> %d", before, after)
+	}
+	// The session state is untouched (not re-queued).
+	f.m.mu.Lock()
+	state := s.State
+	f.m.mu.Unlock()
+	if state != StateDone {
+		t.Fatalf("session state changed on refusal: %q", state)
+	}
+}

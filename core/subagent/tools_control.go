@@ -82,6 +82,13 @@ func (t agentSend) Call(ctx context.Context, args json.RawMessage) (string, erro
 	if s.State == StateRunning || s.State == StateQueued {
 		return "", fmt.Errorf("sub-agent %s is still %s; use agent_result to collect", s.ID, s.State)
 	}
+	// A finished sub-agent whose result was already delivered has no
+	// open thread to continue: refuse instead of silently re-running
+	// with the output going nowhere (and no budget reserved). A fresh
+	// agent_start is the correct follow-up.
+	if s.Delivered || t.m.deliveredSeen[s.ID] {
+		return "", fmt.Errorf("该子代理已结束，请用 agent_start 新开（%s 已交付结果，不重新运行）", s.ID)
+	}
 	// Resume: rebuild a fresh agent from the same role/task and the
 	// previous summary as context. Budget is re-deducted by caller.
 	s.State = StateQueued

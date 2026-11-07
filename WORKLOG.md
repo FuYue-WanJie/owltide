@@ -168,3 +168,12 @@ cmd/owltide/  CLI 入口（chat 交互 / run 一次性）
   4. 已知取舍：token 预算计数跨重启清零（预算本就是按进程计的，重启后重新计）；仍 running 的子代理崩溃后不补投（等 agent_send resume 语义，M2 范围外）
   - 测试：TestResumeRebuildsConversation（agent 包：第二轮请求含第一轮 user+assistant、前缀哈希一致、恢复历史不重复落盘）、TestRecoverUndeliveredFromDisk、TestParseResumeFlag、TestParseResumeFlagRejectsBadIDs
   - 全量验证：go build/vet/gofmt 干净；go test ./... 12 包全绿（cmd 首次有测试）；GOOS=android GOARCH=arm64 CGO_ENABLED=0 通过；CLI 冒烟：`owltide sessions` 正常、`chat --resume ../evil` 被拒（不触模型）
+
+- [2026-11-07] M2 验收整改（四项修复 + 许可证）：
+  1. 许可证 `180e0c1`：LICENSE = Apache-2.0 官方全文（apache.org 逐字复制，仅版权行替换为 Copyright 2026 FuYue-WanJie，diff 校验）；README 许可证节「待定」→ 链接 LICENSE；源文件暂不加文件头
+  2. 半行尾巴截断：`sessionlog.RepairTornTail(path)`（sessionlog.go）——恢复写入前把文件截断到最后一条完整记录的结尾，新追加不再黏在坏行上；Rebuild 无 warning 变体（死代码）删除。TestResumeAfterTruncatedTailAppendsCleanly（截断→追加→三次重建无丢失无警告）
+  3. 悬空 tool_call 修复：`agent.RestoreHistoryRepaired(msgs)`（agent.go）——assistant 发出 tool_calls 但结果未落盘（崩溃窗口）时补一条「tool execution was interrupted by a restart; outcome unknown」合成 tool 消息，走 logMsg 同步持久化进会话日志；二次恢复零补修。TestResumeRepairsDanglingToolCalls（含 provider 合法性断言：每个 tool_call 都有结果）
+  4. running 子代理重启处理：recoverFinished（manager.go）不再静默跳过——dispatched 事件只带 role+mode 无 state，改以「有 dispatched 无 finished」判定崩溃时仍在跑：标记 StateInterrupted（"interrupted"），摘要「子代理 <id> 在重启时被中断，没有结果」，走同一条 deliver 路径（agent_result 消息对写会话日志 + delivered 事件）只投递一次；写令牌显式归 main（新进程本无 reservation，无预算可退）。reDeliverPending 覆盖 done/failed/interrupted。TestRunningSubagentReportedInterrupted（两轮重启 + agent_result 引用 + 令牌/预算断言）
+  5. 会话互斥锁：sessionlog.LockSession（lock.go + lock_unix.go/lock_other.go 构建标签）——sessions/<id>/.lock 以 O_EXCL 创建并写 pid；持锁进程存活（syscall.Kill(pid,0) 探测，无 cgo）则拒绝二开；持锁者已死→报 stale 并接管（删除旧锁重试一次），Release 只删自己 pid 的锁（防误删接管者的）。CLI setup 对新会话与 resume 会话都加锁，退出 cleanup 释放。TestResumeRejectsConcurrentOpen（活锁拒绝/陈旧接管/幂等释放/非持有者不可释放）
+  - 顺带：CLI resume 提示改为「resumed session <id> (N messages, M tool calls repaired)」；setup 打印 stale-lock 警告
+  - 全量验证：go build/vet/gofmt 干净；go test ./... 12 包全绿；GOOS=android GOARCH=arm64 CGO_ENABLED=0 通过

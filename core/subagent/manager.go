@@ -568,28 +568,6 @@ func (m *Manager) ManagerTools() []tool.Tool {
 	}
 }
 
-// reserveBatch pre-deducts n copies of the role budget atomically.
-func (m *Manager) reserveBatch(def agents.Def, n int) (func(), error) {
-	parent := m.opts.Parent
-	if parent == nil {
-		return func() {}, nil
-	}
-	need := def.Budget.MaxTokens * n
-	if !parent.ReserveBudget(need) {
-		m.event("rejected", map[string]any{
-			"reason": "parent budget exhausted (need " + itoa(need) + " tokens for " + itoa(n) + " tasks)",
-			"role":   def.Name,
-		})
-		return nil, fmt.Errorf("parent budget exhausted; cannot start %d %q sub-agents", n, def.Name)
-	}
-	return func() {
-		parent.ReleaseBudget(need)
-		m.event("budget", map[string]any{
-			"op": "released", "tokens": need, "count": n, "role": def.Name,
-		})
-	}, nil
-}
-
 // reserve attempts to pre-deduct def.Budget.MaxTokens from the parent
 // budget; refusal is an error (budget exhausted).
 func (m *Manager) reserve(def agents.Def) (release func(), err error) {

@@ -1183,3 +1183,67 @@ func TestWrapUpToolCallYieldsFixedSummary(t *testing.T) {
 		t.Fatalf("reservation not returned: %d -> %d", before, after)
 	}
 }
+
+// TestParallelTaskForms: tasks[] accepts strings (shared role),
+// {role,task} objects, and a mix; an unknown or non-readonly role in an
+// object element is refused with the correct shape in the message.
+func TestParallelTaskForms(t *testing.T) {
+	f := newFixture(t, nil, fxOpts{})
+	st := f.m.ManagerTools()[0].(interface {
+		Call(context.Context, json.RawMessage) (string, error)
+	})
+	ctx := context.Background()
+
+	// 1. String form (shared role): budget pre-deducted for the sum.
+	before := f.parent.RemainingTokens()
+	out, err := st.Call(ctx, json.RawMessage(
+		`{"role":"explore","mode":"parallel","tasks":["a","b"]}`))
+	if err != nil {
+		t.Fatalf("string form refused: %v", err)
+	}
+	if f.parent.RemainingTokens() != before { // released after completion
+		t.Fatalf("string form leaked budget: %d -> %d", before, f.parent.RemainingTokens())
+	}
+	var res startResult
+	if err := json.Unmarshal([]byte(out), &res); err != nil || len(res.IDs) != 2 {
+		t.Fatalf("string form result: %v %s", err, out)
+	}
+
+	// 2. Object form (per-task role).
+	out, err = st.Call(ctx, json.RawMessage(
+		`{"mode":"parallel","tasks":[{"role":"explore","task":"a"},{"role":"review","task":"b"}]}`))
+	if err != nil {
+		t.Fatalf("object form refused: %v", err)
+	}
+	if err := json.Unmarshal([]byte(out), &res); err != nil || len(res.IDs) != 2 {
+		t.Fatalf("object form result: %v %s", err, out)
+	}
+
+	// 3. Mixed form.
+	out, err = st.Call(ctx, json.RawMessage(
+		`{"role":"explore","mode":"parallel","tasks":["plain",{"role":"review","task":"obj"}]}`))
+	if err != nil {
+		t.Fatalf("mixed form refused: %v", err)
+	}
+	if err := json.Unmarshal([]byte(out), &res); err != nil || len(res.IDs) != 2 {
+		t.Fatalf("mixed form result: %v %s", err, out)
+	}
+
+	// 4. Unknown role in an object element: refused, message carries the
+	// correct shape.
+	_, err = st.Call(ctx, json.RawMessage(
+		`{"mode":"parallel","tasks":[{"role":"no-such-role","task":"a"}]}`))
+	if err == nil {
+		t.Fatal("unknown role must be refused")
+	}
+	if !strings.Contains(err.Error(), "expected shape") || !strings.Contains(err.Error(), "no-such-role") {
+		t.Fatalf("error must name the role and the shape: %v", err)
+	}
+
+	// 5. Non-readonly role in an object element: refused.
+	_, err = st.Call(ctx, json.RawMessage(
+		`{"mode":"parallel","tasks":[{"role":"general","task":"a"}]}`))
+	if err == nil || !strings.Contains(err.Error(), "read-only") {
+		t.Fatalf("non-readonly role must be refused with read-only hint: %v", err)
+	}
+}

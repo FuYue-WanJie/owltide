@@ -29,13 +29,51 @@ func objSchema(props string, required ...string) json.RawMessage {
 
 // ---- agent_start ----
 
+// TaskSpec is one parallel task element. It accepts two JSON forms:
+// a plain string (uses the shared role argument) or an object
+// {"role": "...", "task": "..."} with a per-task role.
+type TaskSpec struct {
+	Role string // empty when the string form is used (shared role)
+	Task string
+}
+
+// UnmarshalJSON implements the dual string/object element form.
+func (t *TaskSpec) UnmarshalJSON(b []byte) error {
+	if len(b) > 0 && b[0] == '"' {
+		var s string
+		if err := json.Unmarshal(b, &s); err != nil {
+			return err
+		}
+		t.Role = ""
+		t.Task = s
+		return nil
+	}
+	var obj struct {
+		Role string `json:"role"`
+		Task string `json:"task"`
+	}
+	if err := json.Unmarshal(b, &obj); err != nil {
+		return fmt.Errorf(
+			"tasks[] elements must be strings or {\"role\",\"task\"} objects, "+
+				`e.g. "tasks": ["first task", {"role":"explore","task":"second task"}]: %w`, err)
+	}
+	if strings.TrimSpace(obj.Task) == "" {
+		return fmt.Errorf(
+			`tasks[] object element needs a non-empty "task", `+
+				`e.g. "tasks": [{"role":"explore","task":"..."}]`)
+	}
+	t.Role = obj.Role
+	t.Task = obj.Task
+	return nil
+}
+
 type startArgs struct {
-	Role        string   `json:"role"`
-	Task        string   `json:"task"`
-	Mode        string   `json:"mode"`
-	Tasks       []string `json:"tasks"` // parallel
-	Steps       []step   `json:"steps"` // chain
-	ContextRefs []string `json:"context_refs"`
+	Role        string     `json:"role"`
+	Task        string     `json:"task"`
+	Mode        string     `json:"mode"`
+	Tasks       []TaskSpec `json:"tasks"` // parallel
+	Steps       []step     `json:"steps"` // chain
+	ContextRefs []string   `json:"context_refs"`
 }
 
 type step struct {
@@ -49,12 +87,15 @@ func (agentStart) Schema() tool.Definition {
 	return tool.Definition{Type: "function", Function: tool.FunctionSchema{
 		Name: "agent_start",
 		Description: "Delegate a task to a sub-agent (role from ~/.owltide/agents). " +
-			"mode=single: one task; mode=parallel: tasks[] with read-only roles only; " +
-			"mode=chain: steps[{role,task}], each output feeds the next. " +
-			"Blocks up to 60s; then returns just the id (collect with agent_result).",
+			"mode=single: one task; mode=parallel: tasks[] with read-only roles only, each element " +
+			`a string (shared role) or an object, e.g. "tasks": ["check docs", ` +
+			`{"role":"explore","task":"scan core/"}]; mode=chain: steps[{role,task}], each output ` +
+			"feeds the next. Blocks up to 60s; then returns just the id (collect with agent_result).",
 		Parameters: objSchema(
 			`"role":{"type":"string"},"task":{"type":"string"},"mode":{"type":"string"},`+
-				`"tasks":{"type":"array","items":{"type":"string"}},`+
+				`"tasks":{"type":"array","items":{"anyOf":[{"type":"string"},`+
+				`{"type":"object","properties":{"role":{"type":"string"},"task":{"type":"string"}},`+
+				`"required":["task"]}}]},`+
 				`"steps":{"type":"array","items":{"type":"object","properties":{`+
 				`"role":{"type":"string"},"task":{"type":"string"}}}},`+
 				`"context_refs":{"type":"array","items":{"type":"string"}}`,
@@ -88,10 +129,22 @@ func (t agentStart) Call(ctx context.Context, args json.RawMessage) (string, err
 	// delegation depth is structurally 1; chains add steps, not depth.
 	if a.Mode == ModeParallel {
 		if len(a.Tasks) == 0 {
-			return "", fmt.Errorf("parallel mode requires tasks[]")
+			return "", fmt.Errorf(
+				`parallel mode requires tasks[], e.g. "tasks": ["first task", {"role":"explore","task":"second task"}]`)
 		}
-		if strings.TrimSpace(a.Role) == "" {
-			return "", fmt.Errorf("parallel mode requires role (a read-only role for all tasks)")
+		// The shared role is only mandatory when a string element (or a
+		// role-less object) is present; all-object batches carry their
+		// own roles. startParallel reports the full shape on errors.
+		hasShared := false
+		for _, ts := range a.Tasks {
+			if ts.Role == "" {
+				hasShared = true
+			}
+		}
+		if hasShared && strings.TrimSpace(a.Role) == "" {
+			return "", fmt.Errorf(
+				`parallel mode requires role when tasks[] contains plain strings; `+
+					`expected shape: {"role":"explore","mode":"parallel","tasks":["plain task",{"role":"explore","task":"other"}]}`)
 		}
 		return t.startParallel(ctx, a)
 	}
@@ -228,40 +281,75 @@ func (m *Manager) foldLarge(summary string) string {
 	return out
 }
 
-// startParallel: tasks[] with one shared read-only role; budget
-// pre-deducted for the sum, refused wholesale when insufficient.
+// startParallel: tasks[] whose elements are strings (shared role from
+// the role argument) or {role,task} objects (per-task role). Every
+// role must be read-only. The batch budget (sum of each task's own
+// role budget) is pre-deducted and returned on completion.
 func (t agentStart) startParallel(ctx context.Context, a startArgs) (string, error) {
 	m := t.m
-	def, err := m.roleDef(a.Role)
-	if err != nil {
-		return "", err
-	}
-	if !def.Readonly {
-		return "", fmt.Errorf("parallel mode only allows read-only roles (explore, review); %q is not", def.Name)
-	}
 	if len(a.Tasks) > m.opts.MaxParallel {
 		return "", fmt.Errorf("parallel batch of %d exceeds concurrency limit %d", len(a.Tasks), m.opts.MaxParallel)
 	}
-	reg, err := m.BuildRegistry(def)
-	if err != nil {
-		return "", err
+	// Resolve each task's role up front: string elements use the
+	// shared role; object elements carry their own (must exist and be
+	// read-only).
+	type spec struct {
+		def  agents.Def
+		task string
 	}
-	release, err := m.reserveBatch(def, len(a.Tasks))
-	if err != nil {
-		return "", err
+	specs := make([]spec, len(a.Tasks))
+	for i, ts := range a.Tasks {
+		role := ts.Role
+		if role == "" {
+			role = a.Role
+		}
+		def, err := m.roleDef(role)
+		if err != nil {
+			return "", fmt.Errorf(
+				"tasks[%d]: unknown role %q (available: %s); expected shape: "+
+					`{"role":"explore","mode":"parallel","tasks":["plain task",{"role":"explore","task":"other"}]}`,
+				i, role, strings.Join(agents.Names(m.opts.Agents), ", "))
+		}
+		if !def.Readonly {
+			return "", fmt.Errorf(
+				"tasks[%d]: parallel mode only allows read-only roles (explore, review); %q is not; "+
+					`expected shape: {"role":"explore","mode":"parallel","tasks":["plain task",{"role":"explore","task":"other"}]}`,
+				i, role)
+		}
+		specs[i] = spec{def: def, task: ts.Task}
 	}
-	reg = m.ExcludeForChild(def, reg)
+	total := 0
+	for _, sp := range specs {
+		total += sp.def.Budget.MaxTokens
+	}
+	if m.parent() != nil && !m.parent().ReserveBudget(total) {
+		m.event("rejected", map[string]any{"reason": "parent budget exhausted (parallel total " + itoa(total) + ")"})
+		return "", fmt.Errorf("parent budget exhausted; parallel batch needs %d tokens", total)
+	}
+	release := func() {
+		if p := m.parent(); p != nil {
+			p.ReleaseBudget(total)
+			m.event("budget", map[string]any{"op": "released", "tokens": total, "count": len(specs)})
+		}
+	}
 	var wg sync.WaitGroup
-	ids := make([]string, len(a.Tasks))
+	ids := make([]string, len(specs))
 	type par struct {
 		s   *Session
 		sum string
 		err error
 	}
-	results := make([]par, len(a.Tasks))
-	for i, task := range a.Tasks {
+	results := make([]par, len(specs))
+	for i, sp := range specs {
+		def := sp.def
+		reg, err := m.BuildRegistry(def)
+		if err != nil {
+			release()
+			return "", err
+		}
+		reg = m.ExcludeForChild(def, reg)
 		s := &Session{
-			ID: newID(), Role: def.Name, Def: def, Task: task,
+			ID: newID(), Role: def.Name, Def: def, Task: sp.task,
 			Mode: ModeParallel, State: StateQueued,
 			Started: m.now(),
 		}
@@ -276,7 +364,7 @@ func (t agentStart) startParallel(ctx context.Context, a startArgs) (string, err
 		m.mu.Unlock()
 		m.event("dispatched", map[string]any{"id": s.ID, "role": s.Role, "mode": s.Mode})
 	}
-	for i := range a.Tasks {
+	for i := range specs {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()

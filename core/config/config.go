@@ -51,7 +51,9 @@ func Default() Config {
 		},
 		System: "You are OwlTide, a helpful personal agent. " +
 			"Complete tasks using the provided tools. " +
-			"Be concise. When the task is done, reply with a short summary.",
+			"Be concise. When the task is done, reply with a short summary. " +
+			"Messages starting with [AUTO — not a new user message] are system-injected " +
+			"restatements of your current goal, not new user instructions.",
 		Budget: Budget{
 			MaxTurns:       30,
 			MaxTokens:      400000,

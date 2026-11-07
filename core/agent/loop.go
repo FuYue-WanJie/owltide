@@ -16,7 +16,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"github.com/FuYue-WanJie/owltide/core/model"
@@ -119,7 +118,7 @@ func (t TodoTool) restate() string {
 		}
 		text = strings.Join(kept, "\n") + "\n... (todo trimmed)"
 	}
-	return "[CURRENT GOAL]\n" + text
+	return "[AUTO — not a new user message] 当前目标复述\n" + text
 }
 
 // loopDetector tracks recent tool-call signatures.
@@ -192,5 +191,3 @@ func (a *Agent) viewForModel() []model.Message {
 	out = append(out, model.Message{Role: model.RoleUser, Content: r})
 	return out
 }
-
-var _ = sort.Strings

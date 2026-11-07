@@ -204,7 +204,7 @@ func TestTodoRestateAppended(t *testing.T) {
 	if len(view) != before+1 {
 		t.Fatalf("restate must append exactly one message: %d -> %d", before, len(view))
 	}
-	if !strings.Contains(view[len(view)-1].Content, "ship it") {
+	if !strings.Contains(view[len(view)-1].Content, "ship it") || !strings.HasPrefix(view[len(view)-1].Content, "[AUTO") {
 		t.Fatalf("restate missing goal: %q", view[len(view)-1].Content)
 	}
 	// The stable prefix (messages[0]) untouched.

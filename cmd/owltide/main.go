@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -30,8 +32,11 @@ const usage = `OwlTide - a personal agent.
 
 Usage:
   owltide init            write an example config to ~/.owltide/config.yaml
-  owltide chat            interactive multi-turn session
-  owltide run "task"      run one task and exit
+  owltide chat [--resume <session-id>]
+                          interactive multi-turn session (optionally resumed)
+  owltide run [--resume <session-id>] "task"
+                          run one task and exit (optionally resumed)
+  owltide sessions        list saved sessions (ids for --resume)
   owltide lock <id>       protect a config item (user only)
   owltide unlock <id>     release a protection (user only)
   owltide changes         list what the agent changed about itself
@@ -47,14 +52,20 @@ func main() {
 		must(store.EnsureLayout(platform.ConfigDir(platform.New().Home())))
 		must(config.WriteDefault(config.Path()))
 		fmt.Println("wrote", config.Path())
+	case "sessions":
+		listSessions()
 	case "chat":
-		runChat()
+		resumeID, _, err := parseResumeFlag(os.Args[2:])
+		must(err)
+		runChat(resumeID)
 	case "run":
-		if len(os.Args) < 3 {
-			fmt.Println(`usage: owltide run "task"`)
+		resumeID, args, err := parseResumeFlag(os.Args[2:])
+		must(err)
+		if len(args) < 1 {
+			fmt.Println(`usage: owltide run [--resume <session-id>] "task"`)
 			os.Exit(2)
 		}
-		runOneShot(strings.Join(os.Args[2:], " "))
+		runOneShot(resumeID, strings.Join(args, " "))
 	case "lock", "unlock":
 		if len(os.Args) < 3 {
 			fmt.Printf("usage: owltide %s <id>\n", os.Args[1])
@@ -73,6 +84,87 @@ func main() {
 		fmt.Print(usage)
 		os.Exit(2)
 	}
+}
+
+// sessionsDir is where per-session message logs live.
+func sessionsDir() string {
+	return platform.ConfigDir(platform.New().Home()) + "/sessions"
+}
+
+// resumeRe matches the ids setup generates (and any later scheme that
+// stays filesystem-safe).
+var resumeRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
+// parseResumeFlag extracts --resume <id> / --resume=<id> from args and
+// returns the id (validated; error on traversal-shaped values) and the
+// remaining arguments.
+func parseResumeFlag(args []string) (string, []string, error) {
+	var id string
+	sawResume := false
+	var rest []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--resume":
+			if i+1 >= len(args) {
+				return "", nil, fmt.Errorf("--resume requires a session id (see: owltide sessions)")
+			}
+			id = args[i+1]
+			sawResume = true
+			i++
+		case strings.HasPrefix(a, "--resume="):
+			id = strings.TrimPrefix(a, "--resume=")
+			sawResume = true
+		default:
+			rest = append(rest, a)
+		}
+	}
+	if sawResume {
+		if id == "" {
+			return "", nil, fmt.Errorf("--resume requires a session id (see: owltide sessions)")
+		}
+		if !resumeRe.MatchString(id) {
+			return "", nil, fmt.Errorf("invalid session id %q", id)
+		}
+	}
+	return id, rest, nil
+}
+
+// listSessions prints saved session ids with their message counts.
+func listSessions() {
+	entries, err := os.ReadDir(sessionsDir())
+	if err != nil {
+		fmt.Println("no saved sessions")
+		return
+	}
+	found := false
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		found = true
+		n := countLines(filepath.Join(sessionsDir(), e.Name(), "messages.jsonl"))
+		fmt.Printf("%s\t%d messages\n", e.Name(), n)
+	}
+	if !found {
+		fmt.Println("no saved sessions")
+	}
+}
+
+func countLines(path string) int {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+	n := 0
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		if strings.TrimSpace(sc.Text()) != "" {
+			n++
+		}
+	}
+	return n
 }
 
 // openStore initializes ~/.owltide layout and the auto-commit store.
@@ -125,7 +217,7 @@ func must(err error) {
 }
 
 // setup builds everything an agent run needs.
-func setup() (agent.Options, func(), *subagent.Manager, error) {
+func setup(resumeID string) (agent.Options, func(), *subagent.Manager, error) {
 	cfg, err := config.Load()
 	if err != nil {
 		return agent.Options{}, nil, nil, err
@@ -163,8 +255,17 @@ func setup() (agent.Options, func(), *subagent.Manager, error) {
 	// Dangerous actions (rm -rf, git push --force, locks.yaml writes)
 	// ask the human at the terminal; the model can never self-approve.
 	reg.SetConfirmer(confirmFromStdin)
-	sessionID := time.Now().UTC().Format("20060102-150405")
-	fmt.Println("session id:", sessionID)
+	sessionID := ""
+	if resumeID != "" {
+		// Resume: reuse the session id so the session log, spill dir
+		// and sub transcripts continue where the crashed process
+		// left off.
+		sessionID = resumeID
+		fmt.Println("session id:", sessionID, "(resumed)")
+	} else {
+		sessionID = time.Now().UTC().Format("20060102-150405")
+		fmt.Println("session id:", sessionID)
+	}
 	// Transaction-level backstop: any tool mutating protected files
 	// (including run_shell tricks) gets rolled back and logged.
 	gd := &guard.Guard{Root: st.Dir, St: st}
@@ -275,14 +376,15 @@ func withSignal() (context.Context, func()) {
 	return ctx, func() { signal.Stop(ch); cancel() }
 }
 
-func runChat() {
-	opts, cleanup, mgr, err := setup()
+func runChat(resumeID string) {
+	opts, cleanup, mgr, err := setup(resumeID)
 	must(err)
 	defer cleanup()
 	ctx, stop := withSignal()
 	defer stop()
 
 	a := agent.New(opts)
+	restoreSession(a, resumeID)
 	mgr.SetParent(a)
 	sc := bufio.NewScanner(os.Stdin)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -309,8 +411,8 @@ func runChat() {
 	}
 }
 
-func runOneShot(task string) {
-	opts, cleanup, mgr, err := setup()
+func runOneShot(resumeID, task string) {
+	opts, cleanup, mgr, err := setup(resumeID)
 	must(err)
 	defer cleanup()
 	ctx, stop := withSignal()
@@ -318,6 +420,7 @@ func runOneShot(task string) {
 
 	opts.OnDelta = func(s string) { fmt.Print(s) }
 	a := agent.New(opts)
+	restoreSession(a, resumeID)
 	mgr.SetParent(a)
 	_, err = a.Run(ctx, task)
 	fmt.Println()
@@ -325,6 +428,25 @@ func runOneShot(task string) {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
+}
+
+// restoreSession rebuilds the conversation from the session log of a
+// previous run (see RebuildWithWarning). Empty resumeID is a no-op.
+// The order matters: restore first, then SetParent — recovered
+// sub-agent results append after the restored history, matching the
+// timeline of the crashed process.
+func restoreSession(a *agent.Agent, resumeID string) {
+	if resumeID == "" {
+		return
+	}
+	msgs, warn, err := sessionlog.RebuildWithWarning(
+		filepath.Join(sessionsDir(), resumeID, "messages.jsonl"))
+	must(err)
+	if warn != "" {
+		fmt.Fprintln(os.Stderr, "warning:", warn)
+	}
+	a.RestoreHistory(msgs)
+	fmt.Printf("resumed session %s (%d messages)\n", resumeID, len(msgs))
 }
 
 // confirmFromStdin asks the user a yes/no question on the terminal.

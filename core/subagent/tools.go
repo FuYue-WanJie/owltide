@@ -15,27 +15,6 @@ import (
 	"github.com/FuYue-WanJie/owltide/core/tool"
 )
 
-// finishSync renders the sync-mode tool result for a finished session.
-// Delivery to the main log happens once via deliver (sync path counts
-// as the first delivery).
-func (m *Manager) finishSync(s *Session, summary string, err error) (string, error) {
-	if err != nil {
-		m.event("finished", map[string]any{
-			"id": s.ID, "role": s.Role, "state": s.State,
-		})
-		m.deliver(s) // failed runs deliver the failure marker once too
-		return "", fmt.Errorf("sub-agent %s failed: %v", s.ID, err)
-	}
-	summary = m.foldLarge(summary)
-	m.deliver(s)
-	m.event("finished", map[string]any{
-		"id": s.ID, "role": s.Role, "state": s.State,
-	})
-	res := startResult{ID: s.ID, Status: s.State, Summary: summary}
-	b, _ := json.Marshal(res)
-	return string(b), nil
-}
-
 func objSchema(props string, required ...string) json.RawMessage {
 	req := ""
 	for i, r := range required {

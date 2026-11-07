@@ -153,5 +153,18 @@ cmd/owltide/  CLI 入口（chat 交互 / run 一次性）
      - 事件只存哈希：AppendEvent 对 >200 字符串字段自动换 `*_digest`（sha256 前 8 字节）；task/summary 从不进事件。TestEventsHashOnly
      - sub/<id>.jsonl 不进 git：写入路径在 logs/（store 跳过）+ 主仓库 .gitignore + store 层测试。TestSubTranscriptNotCommitted
      - context_refs 走 Guard 读规则：resolveContextRefs——spill 引用只经 spill store（id 白名单校验）；文件路径拒绝绝对路径/../软链接逃逸（EvalSymlinks 复核）+ 拒绝受保护文件（Guard.ProtectedPaths）；超长内容过 spill 留摘录。TestContextRefsGuarded
-  5. 顺带修复：startParallel 之前错误拒绝共享 role 参数（现按设计 role+tasks[]）；fixture 注册 agent_* 工具后再以真实工具集重校验角色文件
-  - 全量验证：go build/vet/gofmt 干净；go test ./... 14 包全绿；GOOS=android GOARCH=arm64 CGO_ENABLED=0 交叉编译通过
+   5. 顺带修复：startParallel 之前错误拒绝共享 role 参数（现按设计 role+tasks[]）；fixture 注册 agent_* 工具后再以真实工具集重校验角色文件
+   - 全量验证：go build/vet/gofmt 干净；go test ./... 14 包全绿；GOOS=android GOARCH=arm64 CGO_ENABLED=0 交叉编译通过
+
+- [2026-11-07] P2a M2 会话恢复（--resume）+ M1 验收整改：
+  0. M1 验收整改（并入本次提交）：
+     - events.go 审计字段从「>200 字符才摘要」改为字段白名单（eventFieldAllowlist：id/role/mode/state/op/by/reason/summary_digest/chain/tokens/count/resumed），白名单外的任何键（错误信息、命令、路径等）一律写 `key_digest`（sha256 前 8 字节），与值长度无关——任务内容和敏感串从此不可能进审计日志。TestEventsHashOnly 重写（短的非白名单值同样被摘要）
+     - tools2.go 按内容改名 tools_control.go（agent_status/send/stop/result 四个控制工具）；删除死代码 finishSync（startSingle 纯后台化后无调用方）
+     - 核对：sessionlog.Append 每行一次 Write+Sync（sessionlog.go Append）；agent.go 的持久日志注释与实现一致（NewResultToolCall/logMsg/SessLog 三处）
+     - 快照分支 p2a-m1-wip 与 main 对齐后删除
+  1. 跨重启补投走同一条路径：Manager.recoverFinished 从 subagents.jsonl 重建已完成未投递的会话（状态机：dispatched/finished 取 role+state，delivered 标记跳过；崩溃时仍 running 的会话跳过——半跑无法安全恢复），摘要从 sub/<id>/messages.jsonl 取最后一条非空 assistant 消息（缺失时给事实性占位符）；SetParent 顺序 recoverFinished→reDeliverPending，投递复用 M1 的 deliver（消息对写 SessLog + PushResult + delivered 事件），第三次重启验证零重复。测试 TestRecoverUndeliveredFromDisk（两轮重启）
+  2. Agent.RestoreHistory(msgs)：把 RebuildWithWarning 的序列接回内存历史；故意绕过 logMsg（已持久化的消息重写会重复），system 消息跳过（New 已装当前系统提示词）。prefixHash 在 New 时计算，重启前后一致
+  3. CLI：`owltide chat --resume <id>` / `owltide run --resume <id> "task"`；`owltide sessions` 列出会话 id+消息数；--resume 复用 session id（session log、spill 目录、sub transcripts 全部续上），setup 打印 (resumed)；resume id 白名单校验（^[A-Za-z0-9_-]{1,64}$，拒绝穿越形 id）；恢复发生在 SetParent 之前，补投的结果按崩溃进程的时间线接在恢复历史之后
+  4. 已知取舍：token 预算计数跨重启清零（预算本就是按进程计的，重启后重新计）；仍 running 的子代理崩溃后不补投（等 agent_send resume 语义，M2 范围外）
+  - 测试：TestResumeRebuildsConversation（agent 包：第二轮请求含第一轮 user+assistant、前缀哈希一致、恢复历史不重复落盘）、TestRecoverUndeliveredFromDisk、TestParseResumeFlag、TestParseResumeFlagRejectsBadIDs
+  - 全量验证：go build/vet/gofmt 干净；go test ./... 12 包全绿（cmd 首次有测试）；GOOS=android GOARCH=arm64 CGO_ENABLED=0 通过；CLI 冒烟：`owltide sessions` 正常、`chat --resume ../evil` 被拒（不触模型）

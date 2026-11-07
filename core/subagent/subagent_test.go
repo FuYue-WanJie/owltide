@@ -823,21 +823,32 @@ func TestRolePrefixStable(t *testing.T) {
 	}
 }
 
-// TestEventsHashOnly: audit events never carry long raw strings — a
-// long value is stored as a digest field only.
+// TestEventsHashOnly: audit events use a field allowlist — any key
+// outside it is stored as a digest only, regardless of value length,
+// so task content, commands, paths or error text can never leak.
 func TestEventsHashOnly(t *testing.T) {
 	dir := t.TempDir()
 	long := strings.Repeat("SECRET_PAYLOAD ", 40) // 600 chars
 	AppendEvent(dir, "finished", map[string]any{"id": "sub-ev1", "note": long})
+	// Short non-allowlisted values are digested too (length plays no
+	// role in the decision).
+	AppendEvent(dir, "finished", map[string]any{"id": "sub-ev3", "note": "SHORT_TASK_BODY", "command": "cat ~/.owltide/config.yaml"})
 	data, err := os.ReadFile(filepath.Join(dir, "subagents.jsonl"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(data), "SECRET_PAYLOAD") {
-		t.Fatalf("long raw string leaked into audit event: %s", data)
+	log := string(data)
+	for _, leak := range []string{"SECRET_PAYLOAD", "SHORT_TASK_BODY", "config.yaml"} {
+		if strings.Contains(log, leak) {
+			t.Fatalf("non-allowlisted value leaked into audit event: %q", leak)
+		}
 	}
-	if !strings.Contains(string(data), "note_digest") {
-		t.Fatalf("expected note_digest field: %s", data)
+	if !strings.Contains(log, "note_digest") || !strings.Contains(log, "command_digest") {
+		t.Fatalf("expected digest fields for non-allowlisted keys: %s", log)
+	}
+	// Allowlisted keys pass verbatim.
+	if !strings.Contains(log, `"id":"sub-ev1"`) || !strings.Contains(log, `"id":"sub-ev3"`) {
+		t.Fatalf("allowlisted id field must pass through: %s", log)
 	}
 	// DeliveredIDs round-trip.
 	AppendEvent(dir, "delivered", map[string]any{"id": "sub-ev2", "role": "explore"})
@@ -888,5 +899,94 @@ func TestSubTranscriptNotCommitted(t *testing.T) {
 			strings.HasPrefix(p, "spill/") {
 			t.Fatalf("runtime path %q leaked into config store commit", p)
 		}
+	}
+}
+
+// TestRecoverUndeliveredFromDisk: a fresh manager recovers finished-
+// but-undelivered results from the audit log + sub transcripts alone
+// (no in-memory session state), delivers the pair into the session log
+// exactly once, and a further restart delivers nothing.
+func TestRecoverUndeliveredFromDisk(t *testing.T) {
+	f := newFixture(t, nil, fxOpts{})
+	id := "sub-recov1"
+
+	// Simulate a finished sub run from a previous process: transcript
+	// ending with the final assistant summary + audit events, no
+	// delivered event.
+	tl, err := sessionlog.Open(f.m.subLogDir, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	must(t, tl.Append(model.Message{Role: "user", Content: "task body"}))
+	must(t, tl.Append(model.Message{Role: "assistant", Content: "RECOVERED_SUMMARY_BODY"}))
+	tl.Close()
+	eventsDir := filepath.Join(f.cfgDir, "logs")
+	AppendEvent(eventsDir, "dispatched", map[string]any{"id": id, "role": "explore", "mode": "single"})
+	AppendEvent(eventsDir, "finished", map[string]any{"id": id, "role": "explore", "state": "done"})
+	logPath := filepath.Join(f.root, "sessions", "main", "messages.jsonl")
+
+	countPairs := func() int {
+		msgs, _, err := sessionlog.RebuildWithWarning(logPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		n := 0
+		for _, m := range msgs {
+			if m.Role == "assistant" && len(m.ToolCalls) > 0 && strings.Contains(m.ToolCalls[0].ID, id) {
+				n++
+			}
+		}
+		return n
+	}
+
+	// Restart 1: recovery + delivery.
+	mgr2, err := NewManager(ManagerOpts{
+		Parent: f.parent, Config: f.m.opts.Config,
+		Client: f.m.opts.Client, BaseReg: f.baseReg,
+		Agents: f.agents, SessionID: "test2",
+		SessLog:      f.sessLog,
+		SubLogDir:    f.m.subLogDir,
+		EventsLogDir: eventsDir,
+		Events: func(event string, fields map[string]any) {
+			AppendEvent(eventsDir, event, fields)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr2.SetParent(f.parent)
+	if n := countPairs(); n != 1 {
+		t.Fatalf("recovery must deliver exactly once, got %d", n)
+	}
+	// The delivered content carries the recovered summary.
+	msgs, _, _ := sessionlog.RebuildWithWarning(logPath)
+	found := false
+	for _, m := range msgs {
+		if m.Role == "tool" && strings.Contains(m.Content, "RECOVERED_SUMMARY_BODY") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("recovered summary missing from delivered pair")
+	}
+	if !DeliveredIDs(eventsDir)[id] {
+		t.Fatal("delivered event not persisted")
+	}
+
+	// Restart 2: delivered state wins; nothing new.
+	mgr3, err := NewManager(ManagerOpts{
+		Parent: f.parent, Config: f.m.opts.Config,
+		Client: f.m.opts.Client, BaseReg: f.baseReg,
+		Agents: f.agents, SessionID: "test3",
+		SessLog:      f.sessLog,
+		SubLogDir:    f.m.subLogDir,
+		EventsLogDir: eventsDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr3.SetParent(f.parent)
+	if n := countPairs(); n != 1 {
+		t.Fatalf("second restart re-delivered: %d pairs", n)
 	}
 }

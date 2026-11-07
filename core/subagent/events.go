@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -17,24 +18,40 @@ import (
 
 var eventMu sync.Mutex
 
-// AppendEvent writes one event line with ts + digests.
+// eventFieldAllowlist: the only field keys written through verbatim.
+// Everything else — error text, commands, paths, anything a future
+// call site adds — is stored as a sha256 digest (key_digest), so task
+// content or sensitive strings can never leak into the audit log
+// regardless of length.
+var eventFieldAllowlist = map[string]bool{
+	"id":             true, // sub-<8 hex>
+	"role":           true, // role name
+	"mode":           true, // single|parallel|chain[-chain:<id>]
+	"state":          true, // queued|running|done|stopped|failed
+	"op":             true, // budget op: reserved|released
+	"by":             true, // stop origin: agent_stop
+	"reason":         true, // static refusal text (+ token counts)
+	"summary_digest": true, // already a digest
+	"chain":          true, // chain id, sub-<8 hex>
+	"tokens":         true, // int
+	"count":          true, // int
+	"resumed":        true, // bool
+}
+
+// AppendEvent writes one event line with ts; field keys outside the
+// allowlist are reduced to sha256 digests (key_digest).
 func AppendEvent(logDir, event string, fields map[string]any) {
 	rec := map[string]any{
 		"ts":    time.Now().UTC().Format(time.RFC3339),
 		"event": event,
 	}
 	for k, v := range fields {
-		switch val := v.(type) {
-		case string:
-			if len(val) > 200 {
-				sum := sha256.Sum256([]byte(val))
-				rec[k+"_digest"] = hex.EncodeToString(sum[:8])
-			} else {
-				rec[k] = val
-			}
-		default:
-			rec[k] = val
+		if eventFieldAllowlist[k] {
+			rec[k] = v
+			continue
 		}
+		sum := sha256.Sum256([]byte(fmt.Sprint(v)))
+		rec[k+"_digest"] = hex.EncodeToString(sum[:8])
 	}
 	eventMu.Lock()
 	defer eventMu.Unlock()

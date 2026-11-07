@@ -1,6 +1,7 @@
 package subagent
 
-// agent_status / agent_send / agent_stop / agent_result.
+// agent_status / agent_send (resume) / agent_stop / agent_result:
+// the control tools for already-started sub-agent sessions.
 
 import (
 	"context"

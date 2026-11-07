@@ -10,10 +10,12 @@
 package subagent
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -189,7 +191,116 @@ func (m *Manager) SetParent(p *agent.Agent) {
 	m.mu.Lock()
 	m.opts.Parent = p
 	m.mu.Unlock()
+	m.recoverFinished()
 	m.reDeliverPending()
+}
+
+// subEvent is one parsed audit record used for restart recovery.
+type subEvent struct {
+	Event string `json:"event"`
+	ID    string `json:"id"`
+	Role  string `json:"role"`
+	State string `json:"state"`
+}
+
+// readEvents parses subagents.jsonl in order (tolerating a torn tail
+// like the session log does).
+func readEvents(logDir string) []subEvent {
+	f, err := os.Open(filepath.Join(logDir, "subagents.jsonl"))
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	var out []subEvent
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for sc.Scan() {
+		line := sc.Bytes()
+		if len(strings.TrimSpace(string(line))) == 0 {
+			continue
+		}
+		var e subEvent
+		if json.Unmarshal(line, &e) != nil {
+			break // torn final line: stop at the last clean record
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+// recoverFinished registers finished-but-undelivered sessions found in
+// the audit log, with summaries recovered from the per-sub transcripts
+// (sub/<id>/messages.jsonl), so SetParent's delivery pass re-delivers
+// exactly the results a restart lost. Sessions still running at crash
+// time are skipped: a half-run cannot be resumed safely.
+func (m *Manager) recoverFinished() {
+	if m.opts.EventsLogDir == "" {
+		return
+	}
+	type st struct {
+		role, state string
+		delivered   bool
+	}
+	byID := map[string]*st{}
+	for _, e := range readEvents(m.opts.EventsLogDir) {
+		s := byID[e.ID]
+		if s == nil {
+			s = &st{}
+			byID[e.ID] = s
+		}
+		switch e.Event {
+		case "dispatched", "finished":
+			if e.Role != "" {
+				s.role = e.Role
+			}
+			if e.State != "" {
+				s.state = e.State
+			}
+		case "delivered":
+			s.delivered = true
+		}
+	}
+	m.mu.Lock()
+	for id, s := range byID {
+		if s.delivered || id == "" {
+			continue
+		}
+		if s.state != StateDone && s.state != StateFailed {
+			continue
+		}
+		if _, alive := m.sessions[id]; alive {
+			continue
+		}
+		m.sessions[id] = &Session{
+			ID:      id,
+			Role:    s.role,
+			Def:     m.opts.Agents[s.role],
+			State:   s.state,
+			Summary: m.subSummary(id, s.state),
+		}
+	}
+	m.mu.Unlock()
+}
+
+// subSummary extracts the final assistant message from the sub
+// transcript (sub/<id>/messages.jsonl). Missing or unreadable
+// transcripts yield a factual placeholder.
+func (m *Manager) subSummary(id, state string) string {
+	const missing = "(sub-agent finished before restart; transcript unavailable)"
+	if m.subLogDir == "" {
+		return missing
+	}
+	msgs, _, err := sessionlog.RebuildWithWarning(
+		filepath.Join(m.subLogDir, id, "messages.jsonl"))
+	if err != nil {
+		return missing
+	}
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == model.RoleAssistant && strings.TrimSpace(msgs[i].Content) != "" {
+			return msgs[i].Content
+		}
+	}
+	return missing
 }
 
 // reDeliverPending folds results of sessions that are done/failed but

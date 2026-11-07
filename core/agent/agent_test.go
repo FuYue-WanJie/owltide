@@ -10,12 +10,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/FuYue-WanJie/owltide/core/config"
 	"github.com/FuYue-WanJie/owltide/core/decision"
 	"github.com/FuYue-WanJie/owltide/core/guard"
 	"github.com/FuYue-WanJie/owltide/core/model"
+	"github.com/FuYue-WanJie/owltide/core/sessionlog"
 	"github.com/FuYue-WanJie/owltide/core/store"
 	"github.com/FuYue-WanJie/owltide/core/tool"
 )
@@ -454,4 +456,109 @@ func TestStablePrefixBytes(t *testing.T) {
 		t.Fatalf("prefix not reproducible: %s vs %s", a3.prefixHash, h1)
 	}
 	_ = firstPrefix
+}
+
+// textChunk is a plain assistant text reply in SSE form.
+func textChunk(s string) string {
+	b, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{
+		"delta": map[string]any{"content": s},
+	}}})
+	return chunk(string(b)) + sseDone()
+}
+
+// TestResumeRebuildsConversation: a fresh agent restored from the
+// session log continues the conversation — the model sees the earlier
+// turns, and the prefix stays byte-identical.
+func TestResumeRebuildsConversation(t *testing.T) {
+	var mu sync.Mutex
+	var reqs []model.Request
+	srv := fakeLLM(t, 3, func(n int, req model.Request) string {
+		mu.Lock()
+		reqs = append(reqs, req)
+		mu.Unlock()
+		return textChunk("answer-" + itoaN(n))
+	})
+
+	cfg := config.Default()
+	cfg.Model.Name = "m"
+	cfg.Model.BaseURL = "https://x"
+	reg := tool.NewRegistry()
+
+	root := t.TempDir()
+	log1, err := sessionlog.Open(root, "s1")
+	must(err)
+	opts1 := agentOptions(cfg, model.NewClient(srv.URL, "k", nil), reg, nil)
+	opts1.SessLog = log1
+	a1 := New(opts1)
+	if _, err := a1.Run(context.Background(), "hello-one"); err != nil {
+		t.Fatal(err)
+	}
+	must(log1.Close())
+
+	msgs, warn, err := sessionlog.RebuildWithWarning(filepath.Join(root, "s1", "messages.jsonl"))
+	if err != nil || warn != "" {
+		t.Fatalf("rebuild: %v %q", err, warn)
+	}
+	if len(msgs) < 2 {
+		t.Fatalf("log should hold user+assistant, got %d", len(msgs))
+	}
+
+	// "Restart": fresh agent, same log file appended to.
+	log2, err := sessionlog.Open(root, "s1")
+	must(err)
+	defer log2.Close()
+	opts2 := agentOptions(cfg, model.NewClient(srv.URL, "k", nil), reg, nil)
+	opts2.SessLog = log2
+	a2 := New(opts2)
+	if a2.prefixHash != a1.prefixHash {
+		t.Fatalf("prefix changed across restart: %s vs %s", a1.prefixHash, a2.prefixHash)
+	}
+	a2.RestoreHistory(msgs)
+	if _, err := a2.Run(context.Background(), "hello-two"); err != nil {
+		t.Fatal(err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(reqs) != 2 {
+		t.Fatalf("expected 2 model calls, got %d", len(reqs))
+	}
+	// First call: system + user only.
+	if len(reqs[0].Messages) != 2 {
+		t.Fatalf("first call should carry 2 messages, got %d", len(reqs[0].Messages))
+	}
+	// Second call: the first turn must be present (system, user-one,
+	// assistant-one, user-two).
+	found1, foundA, found2 := false, false, false
+	for _, m := range reqs[1].Messages {
+		switch {
+		case m.Role == model.RoleUser && strings.Contains(m.Content, "hello-one"):
+			found1 = true
+		case m.Role == model.RoleAssistant && strings.Contains(m.Content, "answer-1"):
+			foundA = true
+		case m.Role == model.RoleUser && strings.Contains(m.Content, "hello-two"):
+			found2 = true
+		}
+	}
+	if !found1 || !foundA || !found2 {
+		t.Fatalf("resumed request missing history: user1=%v assistant1=%v user2=%v", found1, foundA, found2)
+	}
+	// The restored history is NOT re-persisted (no duplication).
+	logPath := filepath.Join(root, "s1", "messages.jsonl")
+	data, _ := os.ReadFile(logPath)
+	if got := strings.Count(string(data), "hello-one"); got != 1 {
+		t.Fatalf("restored history was re-persisted: hello-one appears %d times", got)
+	}
+}
+
+func itoaN(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var b []byte
+	for n > 0 {
+		b = append([]byte{byte('0' + n%10)}, b...)
+		n /= 10
+	}
+	return string(b)
 }

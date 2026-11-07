@@ -161,6 +161,20 @@ func (a *Agent) PushResult(assistant, tool model.Message) {
 	a.noticeMu.Unlock()
 }
 
+// RestoreHistory appends a rebuilt message sequence (from
+// sessionlog.RebuildWithWarning) to the in-memory history. It bypasses
+// logMsg on purpose: these messages are already persisted, and writing
+// them again would duplicate them in the log. System messages are
+// skipped — New already installed the current system prompt.
+func (a *Agent) RestoreHistory(msgs []model.Message) {
+	for _, m := range msgs {
+		if m.Role == model.RoleSystem {
+			continue
+		}
+		a.messages = append(a.messages, m)
+	}
+}
+
 // takeNotices drains queued notices.
 func (a *Agent) takeNotices() []model.Message {
 	a.noticeMu.Lock()

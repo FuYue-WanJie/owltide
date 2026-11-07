@@ -697,3 +697,156 @@ func TestTurnTokensRecorded(t *testing.T) {
 		t.Fatalf("decision tokens mismatch: prompt=%d completion=%d, want 2393/49", rec.PromptTokens, rec.CompletionTokens)
 	}
 }
+
+// toolCallJSON builds a one-call assistant SSE chunk.
+func toolCallJSON(id, name, args string) string {
+	tc := map[string]any{
+		"id": id, "type": "function",
+		"function": map[string]string{"name": name, "arguments": args},
+	}
+	b, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{
+		"delta": map[string]any{"tool_calls": []any{tc}},
+	}}})
+	return chunk(string(b)) + sseDone()
+}
+
+// TestAskUserInteractive: scripted answers flow back as tool results
+// with the user-answer marker; choices are echoed; the question lives
+// in the tool call arguments (persisted via the session log).
+func TestAskUserInteractive(t *testing.T) {
+	reg := tool.NewRegistry()
+	ask := &AskUserTool{Asker: func(q string, choices []string) (string, error) {
+		if !strings.Contains(q, "选哪种") {
+			t.Fatalf("unexpected question: %q", q)
+		}
+		return "A", nil
+	}}
+	must(reg.Register(ask))
+
+	cfg := config.Default()
+	cfg.Model.BaseURL = "https://x"
+	srv := fakeLLM(t, 2, func(k int, req model.Request) string {
+		if k == 1 {
+			args, _ := json.Marshal(map[string]any{
+				"question": "选哪种实现？", "choices": []string{"A", "B"},
+			})
+			return toolCallJSON("au1", "ask_user", string(args))
+		}
+		return textChunk("done")
+	})
+	opts := agentOptions(cfg, model.NewClient(srv.URL, "k", nil), reg, nil)
+	root := t.TempDir()
+	slog, err := sessionlog.Open(root, "s")
+	must(err)
+	opts.SessLog = slog
+	t.Cleanup(func() { slog.Close() })
+	a := New(opts)
+	final, err := a.Run(context.Background(), "do it")
+	must(err)
+	if !strings.Contains(final, "done") {
+		t.Fatalf("final: %q", final)
+	}
+	// The answer entered the message log with the marker.
+	msgs, _, err := sessionlog.RebuildWithWarning(filepath.Join(root, "s", "messages.jsonl"))
+	must(err)
+	found := false
+	for _, m := range msgs {
+		if m.Role == model.RoleTool && strings.Contains(m.Content, UserAnswerMark) &&
+			strings.Contains(m.Content, "答：A") && strings.Contains(m.Content, "选项：A / B") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("marked answer missing from log")
+	}
+}
+
+// TestAskUserNonInteractive: no Asker — guidance, no error, no quota use.
+func TestAskUserNonInteractive(t *testing.T) {
+	reg := tool.NewRegistry()
+	ask := &AskUserTool{}
+	must(reg.Register(ask))
+	out, err := ask.Call(context.Background(), json.RawMessage(`{"question":"?"}`))
+	if err != nil {
+		t.Fatalf("non-interactive must not error: %v", err)
+	}
+	if !strings.Contains(out, "无法询问用户") {
+		t.Fatalf("guidance missing: %s", out)
+	}
+}
+
+// TestAskUserRateLimit: more than 3 questions in one turn are refused.
+func TestAskUserRateLimit(t *testing.T) {
+	reg := tool.NewRegistry()
+	ask := &AskUserTool{Asker: func(string, []string) (string, error) { return "ok", nil }}
+	must(reg.Register(ask))
+	for i := 0; i < 3; i++ {
+		if _, err := ask.Call(context.Background(), json.RawMessage(`{"question":"q"}`)); err != nil {
+			t.Fatalf("question %d refused: %v", i+1, err)
+		}
+	}
+	if _, err := ask.Call(context.Background(), json.RawMessage(`{"question":"q"}`)); err == nil {
+		t.Fatal("4th question must be refused")
+	} else if !strings.Contains(err.Error(), "限流") {
+		t.Fatalf("refusal must mention the limit: %v", err)
+	}
+	// New turn resets the budget.
+	ask.resetAskBudget()
+	if _, err := ask.Call(context.Background(), json.RawMessage(`{"question":"q"}`)); err != nil {
+		t.Fatalf("budget must reset per turn: %v", err)
+	}
+}
+
+// TestAskUserDanglingAfterCrash: a crash between the ask_user call and
+// its result repairs the dangling call as unanswered; the question is
+// never re-asked.
+func TestAskUserDanglingAfterCrash(t *testing.T) {
+	cfg := config.Default()
+	cfg.Model.BaseURL = "https://x"
+	reg := tool.NewRegistry()
+	ask := &AskUserTool{Asker: func(string, []string) (string, error) {
+		t.Fatal("must not re-ask after repair")
+		return "", nil
+	}}
+	must(reg.Register(ask))
+
+	root := t.TempDir()
+	log1, err := sessionlog.Open(root, "s")
+	must(err)
+	crashed := []model.Message{
+		{Role: model.RoleUser, Content: "go"},
+		{Role: model.RoleAssistant, ToolCalls: []model.ToolCall{{
+			ID: "au-dangling", Type: "function",
+			Function: model.Function{Name: "ask_user", Arguments: `{"question":"选哪种？"}`},
+		}}},
+	}
+	for _, m := range crashed {
+		must(log1.Append(m))
+	}
+	must(log1.Close())
+
+	rebuilt, _, err := sessionlog.RebuildWithWarning(filepath.Join(root, "s", "messages.jsonl"))
+	must(err)
+	log2, err := sessionlog.Open(root, "s")
+	must(err)
+	defer log2.Close()
+	opts := agentOptions(cfg, nil, reg, nil)
+	opts.SessLog = log2
+	a := New(opts)
+	n, warn := a.RestoreHistoryRepaired(rebuilt)
+	if n != 1 || warn == "" {
+		t.Fatalf("expected 1 repair with warning, got n=%d warn=%q", n, warn)
+	}
+	// The repair text is the unanswered marker, persisted in the log.
+	msgs, _, err := sessionlog.RebuildWithWarning(filepath.Join(root, "s", "messages.jsonl"))
+	must(err)
+	found := false
+	for _, m := range msgs {
+		if m.Role == model.RoleTool && strings.Contains(m.Content, "用户未回答（会话中断）") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("unanswered marker missing from log")
+	}
+}

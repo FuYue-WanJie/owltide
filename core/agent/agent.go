@@ -217,11 +217,17 @@ func (a *Agent) RestoreHistoryRepaired(msgs []model.Message) (int, string) {
 		return 0, ""
 	}
 	for _, tc := range dangling {
+		content := "tool execution was interrupted by a restart; outcome unknown"
+		if tc.Function.Name == "ask_user" {
+			// A pending question can never be answered across a
+			// restart: mark it unanswered, never re-ask it.
+			content = "用户未回答（会话中断）"
+		}
 		a.logMsg(model.Message{
 			Role:       model.RoleTool,
 			Name:       tc.Function.Name,
 			ToolCallID: tc.ID,
-			Content:    "tool execution was interrupted by a restart; outcome unknown",
+			Content:    content,
 		})
 	}
 	return len(dangling), fmt.Sprintf(
@@ -288,6 +294,15 @@ func (a *Agent) maxTokens() int {
 func (a *Agent) Run(ctx context.Context, userText string) (string, error) {
 	start := time.Now()
 	a.turn++
+	// Reset the per-turn ask_user budget (the tool instance lives in
+	// the registry across turns).
+	if a.opts.Tools != nil {
+		if at, ok := a.opts.Tools.Get("ask_user"); ok {
+			if h, ok := at.(interface{ resetAskBudget() }); ok {
+				h.resetAskBudget()
+			}
+		}
+	}
 
 	a.logMsg(model.Message{Role: model.RoleUser, Content: userText})
 

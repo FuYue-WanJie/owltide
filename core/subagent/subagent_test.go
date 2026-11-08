@@ -1473,6 +1473,37 @@ func TestLoopStopReleasesSubagentReservation(t *testing.T) {
 	}
 }
 
+// waitIdle polls until every session in m (except the manually injected
+// marker sessions whose IDs are listed) has reached a terminal state, so
+// that spawned background goroutines finish writing before t.TempDir
+// cleanup runs. Fails the test on timeout instead of hanging.
+func waitIdle(t *testing.T, m *Manager, keepRunning map[string]bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		m.mu.Lock()
+		busy := false
+		for id, s := range m.sessions {
+			if keepRunning[id] {
+				continue
+			}
+			if s.State == StateRunning || s.State == StateQueued {
+				busy = true
+				break
+			}
+		}
+		m.mu.Unlock()
+		if !busy {
+			// Give the completion watcher a moment to deliver the
+			// transcript before TempDir cleanup.
+			time.Sleep(100 * time.Millisecond)
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("timed out waiting for spawned sub-agents to finish")
+}
+
 // TestRouterSingleWriter: in router mode a second writing sub-agent is
 // refused while one is running (error, not queued); read-only roles
 // are unaffected; outside router mode the refusal does not apply.
@@ -1531,4 +1562,9 @@ func TestRouterSingleWriter(t *testing.T) {
 		`{"role":"general","task":"also write","mode":"single"}`)); err != nil {
 		t.Fatalf("non-router mode must not refuse: %v", err)
 	}
+
+	// Let the spawned background sessions finish before TempDir cleanup;
+	// the injected marker sessions ("sub-w1"/"sub-w2") stay as they are.
+	waitIdle(t, f.m, map[string]bool{"sub-w1": true})
+	waitIdle(t, f2.m, map[string]bool{"sub-w2": true})
 }

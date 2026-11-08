@@ -59,6 +59,24 @@ const (
 	StateBudgetExhausted = "budget_exhausted"
 )
 
+// setState / stateOf are the sanctioned accessors for Session.State:
+// the flag is guarded by m.mu, and every cross-goroutine read or write
+// must go through one of these (callers must NOT already hold m.mu —
+// sync.Mutex is not reentrant). Direct s.State access is allowed only
+// inside functions that hold m.mu for their whole critical section
+// (e.g. writeBusyLocked, deliver, reDeliverPending).
+func (m *Manager) setState(s *Session, st string) {
+	m.mu.Lock()
+	s.State = st
+	m.mu.Unlock()
+}
+
+func (m *Manager) stateOf(s *Session) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return s.State
+}
+
 // ManagerOpts wires the manager to the parent's world.
 type ManagerOpts struct {
 	// Parent holds the budget sub-agents draw from; it may be nil at
@@ -215,9 +233,15 @@ func (m *Manager) SetParent(p *agent.Agent) {
 
 // writeBusy reports whether a non-readonly (writing) sub-agent is
 // currently running or queued (router mode's single-writer rule).
+// writeBusyLocked is the m.mu-held variant for callers that already
+// hold the lock and need check-and-act atomicity.
 func (m *Manager) writeBusy() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.writeBusyLocked()
+}
+
+func (m *Manager) writeBusyLocked() bool {
 	for _, s := range m.sessions {
 		if (s.State == StateRunning || s.State == StateQueued) && !s.Def.Readonly {
 			return true
@@ -243,13 +267,11 @@ func (m *Manager) StopAll(reason string) {
 		if s.Cancel != nil {
 			s.Cancel()
 		}
-		m.mu.Lock()
-		s.State = StateStopped
-		m.mu.Unlock()
+		m.setState(s, StateStopped)
 		m.transfer("main")
 		s.release() // idempotent
 		m.event("stopped", map[string]any{"id": s.ID, "by": "run_end", "reason": reason})
-		m.event("finished", map[string]any{"id": s.ID, "role": s.Role, "state": s.State})
+		m.event("finished", map[string]any{"id": s.ID, "role": s.Role, "state": m.stateOf(s)})
 	}
 }
 
@@ -647,12 +669,14 @@ func (m *Manager) reserve(def agents.Def) (release func(), err error) {
 
 // runSession executes one sub-agent to completion synchronously and
 // returns its summary. Budget is pre-deducted from the parent by the
-// caller (agent_start).
+// caller (agent_start). Callers must NOT hold m.mu (setState /
+// stateOf below lock it); every current caller invokes it from an
+// unlocked goroutine.
 func (m *Manager) runSession(ctx context.Context, s *Session) (string, error) {
-	s.State = StateRunning
+	m.setState(s, StateRunning)
 	defer func() {
 		if r := recover(); r != nil {
-			s.State = StateFailed
+			m.setState(s, StateFailed)
 			m.transfer("main") // token returns even on panic
 			panic(r)
 		}
@@ -674,14 +698,14 @@ func (m *Manager) runSession(ctx context.Context, s *Session) (string, error) {
 	s.Summary = summary
 	switch {
 	case err != nil:
-		s.State = StateFailed
+		m.setState(s, StateFailed)
 	case strings.TrimSpace(summary) == "" ||
 		summary == agent.BudgetExhaustedSummary:
 		// The wrap-up could not produce a usable summary: never record
 		// this as a successful done run with an empty deliverable.
-		s.State = StateBudgetExhausted
+		m.setState(s, StateBudgetExhausted)
 	default:
-		s.State = StateDone
+		m.setState(s, StateDone)
 	}
 	m.transfer("main") // defer-style release on every exit path
 	return summary, err

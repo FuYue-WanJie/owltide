@@ -185,11 +185,10 @@ func (t agentStart) startSingle(ctx context.Context, a startArgs) (string, error
 	}
 	// Router discipline: one writer at a time. A second write task is
 	// refused (not queued) until the current one finishes or is
-	// stopped; read-only roles are never blocked.
-	if m.opts.RouterMode && !def.Readonly && m.writeBusy() {
-		return "", fmt.Errorf(
-			"router 模式下单写者限制：已有一个写入型子代理在运行（先 agent_result 收结果或 agent_stop 停止它，再派新的写入任务）")
-	}
+	// stopped; read-only roles are never blocked. The check runs
+	// inside the same m.mu critical section that registers the
+	// session, so concurrent starts cannot both pass (check-and-act
+	// is atomic). Model/tool/disk work below stays OUTSIDE the lock.
 	reg, err := m.BuildRegistry(def)
 	if err != nil {
 		return "", err
@@ -213,6 +212,11 @@ func (t agentStart) startSingle(ctx context.Context, a startArgs) (string, error
 		return "", err
 	}
 	m.mu.Lock()
+	if m.opts.RouterMode && !def.Readonly && m.writeBusyLocked() {
+		m.mu.Unlock()
+		return "", fmt.Errorf(
+			"router 模式下单写者限制：已有一个写入型子代理在运行（先 agent_result 收结果或 agent_stop 停止它，再派新的写入任务）")
+	}
 	m.sessions[s.ID] = s
 	m.mu.Unlock()
 	m.event("dispatched", map[string]any{
@@ -236,7 +240,7 @@ func (t agentStart) startSingle(ctx context.Context, a startArgs) (string, error
 		defer close(done)
 		defer func() {
 			if r := recover(); r != nil {
-				s.State = StateFailed
+				m.setState(s, StateFailed)
 				m.transfer("main")
 				done <- outcome{summary: fmt.Sprintf("sub-agent crashed: %v", r), err: fmt.Errorf("crashed")}
 			}
@@ -258,6 +262,7 @@ func (t agentStart) startSingle(ctx context.Context, a startArgs) (string, error
 		// runSession already determined the terminal state (done /
 		// failed / budget_exhausted); only fill in a state when the
 		// run never got that far.
+		m.mu.Lock()
 		if s.State != StateDone && s.State != StateFailed && s.State != StateBudgetExhausted {
 			if oc.err == nil {
 				s.State = StateDone
@@ -265,9 +270,10 @@ func (t agentStart) startSingle(ctx context.Context, a startArgs) (string, error
 				s.State = StateFailed
 			}
 		}
+		m.mu.Unlock()
 		s.release()
 		m.deliver(s)
-		m.event("finished", map[string]any{"id": s.ID, "role": s.Role, "state": s.State})
+		m.event("finished", map[string]any{"id": s.ID, "role": s.Role, "state": m.stateOf(s)})
 	}()
 	res := startResult{ID: s.ID, Status: StateRunning}
 	b, _ := json.Marshal(res)
@@ -387,7 +393,7 @@ func (t agentStart) startParallel(ctx context.Context, a startArgs) (string, err
 	for i := range results {
 		r := results[i]
 		m.deliver(r.s)
-		m.event("finished", map[string]any{"id": r.s.ID, "role": r.s.Role, "state": r.s.State})
+		m.event("finished", map[string]any{"id": r.s.ID, "role": r.s.Role, "state": m.stateOf(r.s)})
 		if r.err == nil {
 			summaries = append(summaries, "### "+r.s.ID+" ("+r.s.Role+")\n"+m.foldLarge(r.sum))
 		}
@@ -469,13 +475,13 @@ func (t agentStart) startChain(ctx context.Context, a startArgs) (string, error)
 		sum, err := m.runSession(ctx, s)
 		m.transfer("main")
 		if err != nil {
-			m.event("finished", map[string]any{"id": s.ID, "role": s.Role, "state": s.State})
+			m.event("finished", map[string]any{"id": s.ID, "role": s.Role, "state": m.stateOf(s)})
 			return "", fmt.Errorf("chain step %d (%s) failed: %v", i, s.ID, err)
 		}
 		input = sum
 		summaries = append(summaries, "### step "+itoa(i)+" "+s.ID+" ("+s.Role+")\n"+m.foldLarge(sum))
 		m.deliver(s)
-		m.event("finished", map[string]any{"id": s.ID, "role": s.Role, "state": s.State})
+		m.event("finished", map[string]any{"id": s.ID, "role": s.Role, "state": m.stateOf(s)})
 	}
 	res := startResult{ChainID: chainID, Status: StateDone, Summary: strings.Join(summaries, "\n\n")}
 	b, _ := json.Marshal(res)

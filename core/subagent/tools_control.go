@@ -41,7 +41,7 @@ func (t agentStatus) Call(_ context.Context, args json.RawMessage) (string, erro
 		return "", fmt.Errorf("unknown sub-agent %q", a.ID)
 	}
 	fields := map[string]string{
-		"id": s.ID, "role": s.Role, "state": s.State,
+		"id": s.ID, "role": s.Role, "state": state,
 		"started_at": s.Started.UTC().Format("2006-01-02T15:04:05Z"),
 	}
 	if state == StateRunning || state == StateQueued {
@@ -79,8 +79,8 @@ func (t agentSend) Call(ctx context.Context, args json.RawMessage) (string, erro
 	if !ok {
 		return "", fmt.Errorf("unknown sub-agent %q", a.ID)
 	}
-	if s.State == StateRunning || s.State == StateQueued {
-		return "", fmt.Errorf("sub-agent %s is still %s; use agent_result to collect", s.ID, s.State)
+	if t.m.stateOf(s) == StateRunning || t.m.stateOf(s) == StateQueued {
+		return "", fmt.Errorf("sub-agent %s is still %s; use agent_result to collect", s.ID, t.m.stateOf(s))
 	}
 	// A finished sub-agent whose result was already delivered has no
 	// open thread to continue: refuse instead of silently re-running
@@ -91,14 +91,14 @@ func (t agentSend) Call(ctx context.Context, args json.RawMessage) (string, erro
 	}
 	// Resume: rebuild a fresh agent from the same role/task and the
 	// previous summary as context. Budget is re-deducted by caller.
-	s.State = StateQueued
+	t.m.setState(s, StateQueued)
 	if !s.Def.Readonly {
 		t.m.transfer(s.ID)
 	}
 	go func() {
 		sum, err := t.m.runSession(ctx, s)
 		t.m.deliver(s)
-		t.m.event("finished", map[string]any{"id": s.ID, "role": s.Role, "state": s.State, "resumed": true})
+		t.m.event("finished", map[string]any{"id": s.ID, "role": s.Role, "state": t.m.stateOf(s), "resumed": true})
 		_ = sum
 		_ = err
 	}()
@@ -133,8 +133,9 @@ func (t agentStop) Call(_ context.Context, args json.RawMessage) (string, error)
 	if s.Cancel != nil {
 		s.Cancel()
 	}
-	if s.State == StateRunning || s.State == StateQueued {
-		s.State = StateStopped
+	st := t.m.stateOf(s)
+	if st == StateRunning || st == StateQueued {
+		t.m.setState(s, StateStopped)
 		stopped = append(stopped, s.ID)
 		t.m.transfer("main") // token returns on stop
 		t.m.event("stopped", map[string]any{"id": s.ID, "by": "agent_stop"})
@@ -182,9 +183,9 @@ func (t agentResult) Call(_ context.Context, args json.RawMessage) (string, erro
 	if !ok {
 		return "", fmt.Errorf("unknown sub-agent %q", a.ID)
 	}
-	if s.State == StateRunning || s.State == StateQueued {
+	if t.m.stateOf(s) == StateRunning || t.m.stateOf(s) == StateQueued {
 		b, _ := json.Marshal(map[string]string{
-			"id": s.ID, "status": s.State,
+			"id": s.ID, "status": t.m.stateOf(s),
 			"note": "仍在运行，结束本轮即可，结果会自动送达",
 		})
 		return string(b), nil
@@ -196,7 +197,7 @@ func (t agentResult) Call(_ context.Context, args json.RawMessage) (string, erro
 		})
 		sum := t.m.foldLarge(s.Summary)
 		b, _ := json.Marshal(map[string]any{
-			"id": s.ID, "status": s.State, "summary": sum,
+			"id": s.ID, "status": t.m.stateOf(s), "summary": sum,
 		})
 		return string(b), nil
 	}
@@ -204,7 +205,7 @@ func (t agentResult) Call(_ context.Context, args json.RawMessage) (string, erro
 	// in the main log; repeat calls get the reference only, and must
 	// stop polling.
 	b, _ := json.Marshal(map[string]string{
-		"id": s.ID, "status": s.State,
+		"id": s.ID, "status": t.m.stateOf(s),
 		"note": "结果已在本会话前文的 agent_result 中，不要再查询",
 	})
 	return string(b), nil

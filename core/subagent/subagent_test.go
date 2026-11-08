@@ -1135,9 +1135,6 @@ func TestWrapUpToolCallYieldsFixedSummary(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if wrapUpHadTools {
-		t.Fatal("wrap-up request must not carry tools")
-	}
 	// The delivered content is the fixed text (from the main session
 	// log). The run is background: poll until the watchdog delivers.
 	var msgs []model.Message
@@ -1172,17 +1169,26 @@ func TestWrapUpToolCallYieldsFixedSummary(t *testing.T) {
 	}
 	f.m.mu.Unlock()
 	deadline2 := time.Now().Add(3 * time.Second)
-	for s.State != StateBudgetExhausted && time.Now().Before(deadline2) {
+	for f.m.stateOf(s) != StateBudgetExhausted && time.Now().Before(deadline2) {
 		time.Sleep(20 * time.Millisecond)
 	}
-	f.m.mu.Lock()
-	state := s.State
-	f.m.mu.Unlock()
+	state := f.m.stateOf(s)
 	if state != StateBudgetExhausted {
 		t.Fatalf("state = %q, want budget_exhausted", state)
 	}
 	if after := f.parent.RemainingTokens(); after != before {
 		t.Fatalf("reservation not returned: %d -> %d", before, after)
+	}
+
+	// Every spawned session is terminal and the watchdog has delivered,
+	// so no goroutine touches the fixture (or the fake server) anymore.
+	// Reading the flag now is race-free; t.Cleanup closes the server
+	// only after this function returns with all goroutines quiesced.
+	mu.Lock()
+	hadTools := wrapUpHadTools
+	mu.Unlock()
+	if hadTools {
+		t.Fatal("wrap-up request must not carry tools")
 	}
 }
 

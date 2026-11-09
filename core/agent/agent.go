@@ -342,6 +342,12 @@ func (a *Agent) Run(ctx context.Context, userText string) (string, error) {
 	for {
 		if ctx.Err() != nil {
 			runErr = ctx.Err()
+			// Context cancellation (Ctrl-C, parent teardown) is an
+			// abort: OnRunEnd must fire so reservations return and
+			// background work stops. Empty-run special case: a Run
+			// that never started still ends the process — treat as
+			// abort too.
+			abortReason = "context_cancelled"
 			break
 		}
 		// Delayed-write check: tampering may land after the tool

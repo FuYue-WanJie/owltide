@@ -1613,3 +1613,67 @@ func TestStartFailureLeavesNoResidue(t *testing.T) {
 		t.Fatalf("failed start must not touch budget: %d -> %d", before, after)
 	}
 }
+
+// TestContextCancelFiresOnRunEnd: Ctrl-C (context cancellation) is an
+// abort path — OnRunEnd fires so the manager stops sub-agents, returns
+// the write token and stops background jobs (no orphans at exit).
+func TestContextCancelFiresOnRunEnd(t *testing.T) {
+	srv := fakeLLM2(t, func(int, model.Request) string {
+		// The model streams a run_shell background job, then keeps the
+		// loop alive; the test cancels the context mid-run.
+		return textReply("working")
+	})
+	f := newFixture(t, nil, fxOpts{})
+	f.m.opts.Client = model.NewClient(srv.URL, "k", nil)
+
+	// Background job owned by the manager (as setup() wires it).
+	jm := tool.NewJobManager()
+	f.m.SetJobs(jm)
+	dir := t.TempDir()
+	if _, err := jm.Start("/bin/sh", "-c", "sleep 60", dir, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+
+	fired := make(chan string, 1)
+	// Mirror SetParent's wiring, then chain the recorder (SetOnRunEnd
+	// replaces, it does not compose — that is exactly why the recorder
+	// must call StopAll itself, like the manager's own wiring does).
+	f.parent.SetOnRunEnd(func(reason string) {
+		f.m.StopAll(reason)
+		fired <- reason
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel() // the "Ctrl-C"
+	}()
+	_, _ = f.parent.Run(ctx, "work")
+
+	select {
+	case reason := <-fired:
+		// Any abort reason is fine (model_error may win the race with
+		// the context check): what matters is that OnRunEnd fired and
+		// StopAll ran, stopping the background job.
+		if reason == "" {
+			t.Fatal("OnRunEnd fired with empty reason")
+		}
+		t.Logf("OnRunEnd reason: %s", reason)
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnRunEnd never fired on context cancellation")
+	}
+
+	// The job must be terminal (killed), not running.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		res, err := jm.Output("job-1", 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res["state"] != "running" {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("background job still running after context-cancelled run")
+}

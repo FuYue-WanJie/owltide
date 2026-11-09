@@ -487,6 +487,11 @@ func runChat(resumeID string, router bool) {
 		fmt.Println()
 		_ = reply
 	}
+	// Chat exit (EOF, empty line, or Ctrl-C): normal Run completions do
+	// not fire OnRunEnd, so background sub-agents and shell jobs would
+	// be orphaned at process exit. StopAll is idempotent and covers
+	// both (it also stops the background jobs).
+	mgr.StopAll("chat_exit")
 }
 
 func runOneShot(resumeID string, router bool, task string) {

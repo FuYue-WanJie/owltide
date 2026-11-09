@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -26,6 +27,7 @@ import (
 	"github.com/FuYue-WanJie/owltide/core/store"
 	"github.com/FuYue-WanJie/owltide/core/subagent"
 	"github.com/FuYue-WanJie/owltide/core/tool"
+	"github.com/FuYue-WanJie/owltide/internal/serve"
 )
 
 const usage = `OwlTide - a personal agent.
@@ -37,6 +39,9 @@ Usage:
                           --router delegates everything to sub-agents)
   owltide run [--resume <session-id>] [--router] "task"
                           run one task and exit (optionally resumed)
+  owltide serve [--addr 127.0.0.1:7877]
+                          read-only HTTP API over runtime state (sessions,
+                          sub-agents, jobs, SSE events); binds localhost only
   owltide sessions        list saved sessions (ids for --resume)
   owltide lock <id>       protect a config item (user only)
   owltide unlock <id>     release a protection (user only)
@@ -55,6 +60,8 @@ func main() {
 		fmt.Println("wrote", config.Path())
 	case "sessions":
 		listSessions()
+	case "serve":
+		runServe(os.Args[2:])
 	case "chat":
 		resumeID, flags, _, err := parseFlags(os.Args[2:])
 		must(err)
@@ -574,4 +581,43 @@ func confirmFromStdin(prompt string) bool {
 	}
 	ans := strings.ToLower(strings.TrimSpace(sc.Text()))
 	return ans == "y" || ans == "yes"
+}
+
+// runServe hosts the read-only HTTP API. Bind address defaults to
+// loopback and stays loopback unless the user passes --addr
+// explicitly; the API exposes sessions, sub-agent and job state only —
+// never the API key, endpoints or env contents (they are not in scope
+// of any handler: serve does not load the config's secret material).
+func runServe(args []string) {
+	addr := "127.0.0.1:7877"
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--addr" && i+1 < len(args) {
+			addr = args[i+1]
+			i++
+		} else if strings.HasPrefix(args[i], "--addr=") {
+			addr = strings.TrimPrefix(args[i], "--addr=")
+		}
+	}
+	if addr == "" || !isLoopbackAddr(addr) {
+		fmt.Fprintln(os.Stderr, "refusing to bind non-loopback address:", addr,
+			"(serve is localhost-only; override requires code, not a flag)")
+		os.Exit(2)
+	}
+	sv := serve.New(serve.Sessions{Dir: sessionsDir()}, &serve.State{})
+	// Live wiring is only possible when this process also runs an
+	// agent; a bare `serve` shows persisted sessions and any state
+	// pushed via Publish. Wiring to a live manager arrives with the
+	// UI milestone (the manager lives in chat/run processes).
+	sv.Publish("hello", map[string]string{"note": "owltide serve up"})
+	must(sv.ListenAndServe(addr))
+}
+
+// isLoopbackAddr allows only loopback hosts (any port).
+func isLoopbackAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback() || host == "localhost"
 }

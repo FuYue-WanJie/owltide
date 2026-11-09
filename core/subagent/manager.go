@@ -860,3 +860,23 @@ func clampStr(s string, n int) string {
 	}
 	return s[:n]
 }
+
+// SubsSnapshot returns a status list of all sessions (serve API view):
+// id, role, state, task digest. Read-only over m.mu; never exposes
+// model config, client or keys.
+func (m *Manager) SubsSnapshot() []map[string]any {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]map[string]any, 0, len(m.sessions))
+	for id, s := range m.sessions {
+		task := s.Task
+		if len(task) > 120 {
+			task = task[:120] + "…"
+		}
+		out = append(out, map[string]any{
+			"id": id, "role": s.Role, "state": s.State,
+			"task": task, "delivered": s.Delivered,
+		})
+	}
+	return out
+}

@@ -357,3 +357,19 @@ func (t JobKill) Call(_ context.Context, args json.RawMessage) (string, error) {
 	b, _ := json.Marshal(out)
 	return string(b), nil
 }
+
+// Snapshot returns a status list of all known jobs (serve API view).
+func (m *JobManager) Snapshot() []map[string]any {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]map[string]any, 0, len(m.jobs))
+	for id, j := range m.jobs {
+		out = append(out, map[string]any{
+			"id": id, "state": j.State, "exit_code": j.ExitCode,
+			"command":  j.Command,
+			"started":  j.Started.UTC().Format(time.RFC3339),
+			"dropped":  j.dropped,
+		})
+	}
+	return out
+}

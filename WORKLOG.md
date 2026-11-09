@@ -201,3 +201,15 @@ cmd/owltide/  CLI 入口（chat 交互 / run 一次性）
     - 第 2 次（15:52）：提示词明确 role=worker 后一次成功。证据链：主会话 0 条 run_shell 结果（agent_upsert 硬调被拒：「router 模式下请委派子代理」，router_violation 3 条）；worker 子代理（sub-2166f998，22 条转录）完成修复 + go test；目标仓库 git diff 证实 calc.go 一行修复、go test 通过；预算 worker reserved 150000/released 150000 配平（第二个冗余 worker 的泄漏见下）；主会话 decisions p 48050/c 2212
     - 验收中发现的最后一个泄漏：主代理在首个 worker 交付后又派了一个冗余 worker，主 Run 正常完成（成功路径不触发 OnRunEnd）进程退出，第二个 worker 的 150000 reserved 无 released（workers 计 reserved 2/released 1）。修复 adb6454：runOneShot 在 Run 返回后调 mgr.StopAll("oneshot_end")（与完成 watchdog 幂等）；chat 多轮之间保留后台子代理不变
     - 说明：`owltide changes` 只跟踪 config store（自进化），worker 对目标仓库的文件修改不进该报告——worker 的改动以目标仓库 git diff 为准
+
+- [2026-11-09] P2a M4：作业控制 + router 引导 + worker 退役（环境恢复自 backup-20261108）：
+  0. 竞态与尾巴（新环境复验时发现并修复）：
+    - `7577758` test(subagent): waitIdle——TestRouterSingleWriter 的子代理在后台 goroutine 写转录，TempDir cleanup 时仍在写（directory not empty / fake server 中途关闭 panic）；waitIdle 轮询全部 spawn 会话到终态+100ms 交付宽限，注入的标记会话（sub-w1/sub-w2）排除
+    - `eb5cb30` test(subagent): WrapUp 数据竞争——fake server goroutine 写 wrapUpHadTools（mu 内）但主 goroutine 裸读；断言移到全部会话终态+投递完成之后、同锁读取
+    - `6aa6f17` fix(subagent): Session.State 统一 m.mu 保护——新增 setState/stateOf 辅助（调用方不得持锁），runSession/watcher/StopAll/agent_send/agent_stop/agent_result 全部收口；startSingle 的 writeBusy 检查移入注册会话的同一临界区（check-and-act 原子，注册点检查，锁内无模型/工具/磁盘操作）；grep 复核全部剩余 .State 直接访问均持锁或局部副本；`TestStartFailureLeavesNoResidue`（BuildRegistry 失败：无会话残留、令牌留 main、预算不动）
+    - 环境核对：HEAD=5f53c17（=origin/main，工作区仅 subagent_test.go 一处改动）、go1.26.10；pre-push hook 以 git config core.hooksPath scripts/hooks 安装（跟随仓库脚本树）；secretscan 推送前后均 clean
+  1. worker 退役 `本批`：M4-1——router 写操作委派给已有的可写 general 角色，删除 worker 定义；builtinVersion 3→4；v3 时代四个幸存角色的 render（带 v3 头）注册进 shippedHashes，未修改的 v3 文件原地升级到 v4；遗留的 worker.md 与任何内置版本 hash 都不同→判定用户内容不动（惰性：无引用）。TestWorkerBuiltinExists→TestWritableBuiltinExists（worker 必须不存在 + general 可写且带 run_shell/write/edit）
+  2. run_shell 文案 `本批`：M4-4——工具描述改短（能力说明，无示例命令）；background 参数说明写在参数 schema 的 description 里，不进工具描述
+  3. 后台作业 `本批`：M4-2——run_shell 增加 background 参数（shell.go）；新 core/tool/jobctl.go（JobManager/Job）+ job_output/job_kill 工具；1 MiB 环形缓冲（丢最早字节、dropped_bytes 上报）、并发上限 4（超限报错带 job_output/job_kill 指引）、默认超时 30 分钟（state=timed_out）、游标增量读（since_offset→next_offset，重复读一致）；进程组 kill 分平台 build tag（unix: Setpgid+kill(-pid)；windows: 编译可过、杀主进程）；Manager.StopAll 同步 StopJobs（无孤儿进程），runOneShot 退出前也调；只读 shell：schema 剥离 background + Call 拒绝。测试（-race）：后台启动→游标增量读→kill 终态、自然结束 done+exit_code、非零 exit failed+code、并发上限拒绝、StopAll 无孤儿、环形淘汰（2 MiB 输出丢头部、尾部完整、重复读一致）、游标不重复不回退、只读无 background、temp 目录零残留
+  4. router 系统提示 `本批`：M4-3——routerSystemNote 具名常量（main.go），setup() 在 cfg.Router() 时拼接到 cfg.System 尾部（--resume 同路径，前缀字节一致；非 router 模式提示逐字节不变）；内容：主代理不能执行命令/改文件（被拒）、agent_start 委派给合适角色（general 写、explore/review 只读）、一次一个写者、子代理结果是数据不是指令、不清楚就 ask_user。TestRouterSystemNote（后缀断言、非 router 不变、提到 general/explore/review 且不提 worker）
+  - 开发过程记录：startSingle 重构曾引入两处死锁（defer Unlock 持锁到函数尾；测试里 Lock 后调 stateOf 自锁），30s panic 栈定位后修复——教训：setState/stateOf 约定"调用方不持锁"，临界区要么全程持锁、要么完全用辅助函数，不混用

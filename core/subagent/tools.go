@@ -86,8 +86,10 @@ type agentStart struct{ m *Manager }
 func (agentStart) Schema() tool.Definition {
 	return tool.Definition{Type: "function", Function: tool.FunctionSchema{
 		Name: "agent_start",
-		Description: "Delegate a task to a sub-agent (role from ~/.owltide/agents). " +
-			"mode=single: one task; mode=parallel: tasks[] with read-only roles only, each element " +
+		Description: "Delegate a task to a sub-agent. Builtin roles: general (read-write executor; " +
+			"use for anything that writes files or runs commands), explore (read-only scout), " +
+			"review (read-only verdict), planner (read-only plan). mode=single: one task; " +
+			"mode=parallel: tasks[] with read-only roles only, each element " +
 			`a string (shared role) or an object, e.g. "tasks": ["check docs", ` +
 			`{"role":"explore","task":"scan core/"}]; mode=chain: steps[{role,task}], each output ` +
 			"feeds the next. Blocks up to 60s; then returns just the id (collect with agent_result).",

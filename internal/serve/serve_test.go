@@ -58,7 +58,10 @@ func TestSessionListAndMessages(t *testing.T) {
 		t.Fatalf("messages = %d, want 2", list[0].Messages)
 	}
 
-	resp2, _ := http.Get(ts.URL + "/api/sessions/20261109-100000")
+	resp2, err := http.Get(ts.URL + "/api/sessions/20261109-100000")
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer resp2.Body.Close()
 	var msgs []json.RawMessage
 	if err := json.NewDecoder(resp2.Body).Decode(&msgs); err != nil {

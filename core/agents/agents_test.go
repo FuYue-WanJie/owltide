@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -126,8 +127,8 @@ func TestSeedBuiltinsVersionUpgrade(t *testing.T) {
 	}
 	explorePath := filepath.Join(Dir(root), "explore.md")
 	data, _ := os.ReadFile(explorePath)
-	if !strings.Contains(string(data), "builtin_version: 3") {
-		t.Fatalf("fresh seed must stamp builtin_version: 3:\n%s", data)
+	if !strings.Contains(string(data), fmt.Sprintf("builtin_version: %d", builtinVersion)) {
+		t.Fatalf("fresh seed must stamp builtin_version: %d:\n%s", builtinVersion, data)
 	}
 
 	// 2. Untouched v1 file (hash matches a shipped older version):
@@ -184,28 +185,32 @@ func TestSeedBuiltinsVersionUpgrade(t *testing.T) {
 	}
 }
 
-// TestWorkerBuiltinExists: router mode needs a writable role; worker is
-// seeded among the builtins with run_shell and editing tools.
-func TestWorkerBuiltinExists(t *testing.T) {
-	var worker *Def
+// TestWritableBuiltinExists: router mode needs a writable role; general
+// is seeded among the builtins with run_shell and editing tools, and
+// the retired worker role is gone (M4: writes delegate to general).
+func TestWritableBuiltinExists(t *testing.T) {
+	var general *Def
 	for _, d := range BuiltinRoles() {
 		if d.Name == "worker" {
-			worker = &d
+			t.Fatal("worker role must be removed from builtins (delegates to general)")
+		}
+		if d.Name == "general" {
+			general = &d
 		}
 	}
-	if worker == nil {
-		t.Fatal("worker role missing from builtins")
+	if general == nil {
+		t.Fatal("general role missing from builtins")
 	}
-	if worker.Readonly {
-		t.Fatal("worker must be writable")
+	if general.Readonly {
+		t.Fatal("general must be writable")
 	}
 	has := map[string]bool{}
-	for _, tl := range worker.Tools {
+	for _, tl := range general.Tools {
 		has[tl] = true
 	}
 	for _, need := range []string{"run_shell", "edit_file", "write_file"} {
 		if !has[need] {
-			t.Fatalf("worker missing %q", need)
+			t.Fatalf("general missing %q", need)
 		}
 	}
 }

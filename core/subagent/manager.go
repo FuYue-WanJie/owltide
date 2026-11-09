@@ -183,6 +183,21 @@ type Manager struct {
 	// confirmMu serializes confirmation requests from parallel
 	// sub-agents: one terminal, one question at a time (queued).
 	confirmMu sync.Mutex
+
+	// jobs are the main agent's background shell jobs; StopAll also
+	// stops them so an aborted run leaves no orphan processes.
+	jobs *tool.JobManager
+}
+
+// SetJobs wires the background-job manager (called after setup builds
+// it together with the main shell).
+func (m *Manager) SetJobs(j *tool.JobManager) { m.jobs = j }
+
+// StopJobs stops every running background job (no orphans).
+func (m *Manager) StopJobs() {
+	if m.jobs != nil {
+		m.jobs.StopAll()
+	}
 }
 
 // NewManager builds the manager and registers the agent_* tools on
@@ -255,6 +270,7 @@ func (m *Manager) writeBusyLocked() bool {
 // the parent's abort paths so a stopped run never leaves reservations
 // behind (the audit log shows reserved-without-released otherwise).
 func (m *Manager) StopAll(reason string) {
+	m.StopJobs() // background shell jobs die with the run too
 	m.mu.Lock()
 	var targets []*Session
 	for _, s := range m.sessions {

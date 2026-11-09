@@ -15,6 +15,9 @@ type shellArgs struct {
 	Command string `json:"command"`
 	// WorkingDir is optional; empty means inherit.
 	WorkingDir string `json:"working_dir"`
+	// Background runs the command as a tracked job and returns a job
+	// id at once (job_output / job_kill collect or stop it).
+	Background bool `json:"background"`
 }
 
 // Caps: executes subprocesses (may also touch the network via
@@ -32,6 +35,8 @@ type Shell struct {
 	TimeoutSec int
 	// WorkDir is the default working directory.
 	WorkDir string
+	// Jobs manages background=true runs; nil disables background.
+	Jobs *JobManager
 
 	confirmer Confirmer
 }
@@ -62,10 +67,13 @@ func (Shell) Schema() Definition {
 	return Definition{
 		Type: "function",
 		Function: FunctionSchema{
-			Name:        "run_shell",
-			Description: "Run a shell command and return combined stdout+stderr. Use for builds, tests, git, anything. Output is truncated if huge.",
+			Name: "run_shell",
+			Description: "Execute a shell command. Returns combined stdout+stderr, " +
+				"truncated if huge.",
 			Parameters: object(
-				`"command":{"type":"string"},"working_dir":{"type":"string"}`,
+				`"command":{"type":"string"},`+
+					`"working_dir":{"type":"string","description":"Optional working directory; empty inherits the session default."},`+
+					`"background":{"type":"boolean","description":"Run asynchronously and return a job id immediately instead of waiting. Collect output with job_output; stop with job_kill."}`,
 				"command"),
 		},
 	}
@@ -78,6 +86,35 @@ func (s Shell) Call(ctx context.Context, args json.RawMessage) (string, error) {
 	}
 	if a.Command == "" {
 		return "", fmt.Errorf("command is required")
+	}
+	if a.Background {
+		if s.Jobs == nil {
+			return "", fmt.Errorf("background execution is not enabled in this session")
+		}
+		if isDangerousCommand(a.Command) {
+			if err := confirmDanger(s.confirmer, "command", a.Command); err != nil {
+				return "", err
+			}
+		}
+		dir := s.WorkDir
+		if a.WorkingDir != "" {
+			dir = a.WorkingDir
+		}
+		var bin, flag string
+		if runtime.GOOS == "windows" {
+			bin, flag = "cmd", "/c"
+		} else {
+			bin, flag = "/bin/sh", "-c"
+		}
+		id, err := s.Jobs.Start(bin, flag, a.Command, dir, JobTimeout)
+		if err != nil {
+			return "", err
+		}
+		b, _ := json.Marshal(map[string]any{
+			"job_id": id, "state": JobRunning,
+			"note": "collect with job_output (offset cursor); stop with job_kill",
+		})
+		return string(b), nil
 	}
 	if isDangerousCommand(a.Command) {
 		if err := confirmDanger(s.confirmer, "command", a.Command); err != nil {

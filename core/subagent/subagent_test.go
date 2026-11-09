@@ -1574,3 +1574,42 @@ func TestRouterSingleWriter(t *testing.T) {
 	waitIdle(t, f.m, map[string]bool{"sub-w1": true})
 	waitIdle(t, f2.m, map[string]bool{"sub-w2": true})
 }
+
+// TestStartFailureLeavesNoResidue: a role whose whitelist names an
+// unknown tool fails at BuildRegistry, which runs BEFORE the session is
+// registered and BEFORE the write token transfers. The invariant: no
+// session in m.sessions, write token still "main", parent budget
+// untouched.
+func TestStartFailureLeavesNoResidue(t *testing.T) {
+	f := newFixture(t, nil, fxOpts{})
+	// A broken role: whitelist names a tool that is not registered.
+	bad := agents.Def{
+		Name: "broken", Model: "inherit",
+		SystemPrompt: "broken role", Tools: []string{"no_such_tool"},
+		Budget: agents.Budget{MaxTurns: 2, MaxTokens: 5000},
+	}
+	f.m.opts.Agents["broken"] = bad
+
+	before := f.parent.RemainingTokens()
+	st := f.m.ManagerTools()[0].(interface {
+		Call(context.Context, json.RawMessage) (string, error)
+	})
+	_, err := st.Call(context.Background(), json.RawMessage(
+		`{"role":"broken","task":"t","mode":"single"}`))
+	if err == nil {
+		t.Fatal("start with unknown whitelist tool must fail")
+	}
+
+	f.m.mu.Lock()
+	n := len(f.m.sessions)
+	f.m.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("failed start must not leave sessions behind: %d", n)
+	}
+	if got := f.m.writer; got != "main" {
+		t.Fatalf("write token must stay with main on failed start: %q", got)
+	}
+	if after := f.parent.RemainingTokens(); after != before {
+		t.Fatalf("failed start must not touch budget: %d -> %d", before, after)
+	}
+}

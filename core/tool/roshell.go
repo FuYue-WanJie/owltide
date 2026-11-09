@@ -37,29 +37,50 @@ func (r *ReadOnlyShell) CloneWithConfirmer(c Confirmer) Tool {
 	return &ReadOnlyShell{Inner: inner}
 }
 
-// Schema matches run_shell so the model sees one tool name.
+// Schema matches run_shell so the model sees one tool name. The
+// background parameter is stripped: read-only roles never get
+// background execution.
 func (r *ReadOnlyShell) Schema() Definition {
 	d := r.Inner.Schema()
 	d.Function.Name = "run_shell"
 	d.Function.Description = "Run a READ-ONLY shell command. Only allowlisted read-only " +
 		"programs are permitted; redirects, command substitution and pipes to " +
 		"non-allowlisted commands are refused. git runs sandboxed (no hooks/fsmonitor, no -c)."
+	var schema struct {
+		Type       string         `json:"type"`
+		Properties map[string]any `json:"properties"`
+		Required   []string       `json:"required"`
+	}
+	if err := json.Unmarshal(d.Function.Parameters, &schema); err == nil {
+		delete(schema.Properties, "background")
+		if b, err := json.Marshal(struct {
+			Type       string         `json:"type"`
+			Properties map[string]any `json:"properties"`
+			Required   []string       `json:"required"`
+		}{schema.Type, schema.Properties, schema.Required}); err == nil {
+			d.Function.Parameters = b
+		}
+	}
 	return d
 }
 
 // Call delegates after gating, sandboxing git invocations.
 func (r *ReadOnlyShell) Call(ctx context.Context, args json.RawMessage) (string, error) {
 	var a struct {
-		Command string `json:"command"`
+		Command    string `json:"command"`
+		Background bool   `json:"background"`
 	}
 	if err := json.Unmarshal(args, &a); err != nil {
 		return "", err
+	}
+	if a.Background {
+		return "", fmt.Errorf("read-only shell: background execution is not available")
 	}
 	if err := r.Gate(a.Command); err != nil {
 		return "", fmt.Errorf("read-only shell: %v", err)
 	}
 	a.Command = sandboxGit(a.Command)
-	b, _ := json.Marshal(a)
+	b, _ := json.Marshal(map[string]string{"command": a.Command})
 	return r.Inner.Call(ctx, b)
 }
 

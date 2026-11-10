@@ -14,7 +14,7 @@
 
 ```
 ┌──────────── 入口 Channels ────────────┐
-│  WebUI   CLI   QQ（OneBot 协议）  …   │   只负责收发消息，不含业务逻辑
+│  WebUI   CLI   社交入口（Channel 插件）  │   只负责收发消息，不含业务逻辑
 └──────────────┬────────────────────────┘
                │ Session API（统一会话接口）
 ┌──────────────▼────────────────────────┐
@@ -47,7 +47,7 @@
   tools/       自写工具（MCP 服务器，子进程运行）
   skills/      Skills（Markdown）
   memory/      记忆（Markdown）
-  channels/    入口配置（QQ 群、触发词…）
+  channels/    入口配置（社交平台群、触发词…）
   config.yaml  全局配置
 ```
 
@@ -61,7 +61,7 @@
   agents/      子代理定义（YAML：模型、提示词、可用工具、预算）
   skills/      Skills（Markdown，P1 只管写文件）
   memory/      记忆（Markdown，P1 只管写文件）
-  channels/    入口配置（QQ 群、触发词…，P1 只留目录）
+  channels/    入口配置（社交平台群、触发词…，P1 只留目录）
   config.yaml  全局配置
   locks.yaml   锁定名单（见 5.1）
   logs/        决策日志（.gitignore，不入 git）
@@ -169,11 +169,14 @@ Kotlin 应用
 
 核心按任务自动选择环境，也可以在子代理配置里指定。
 
-## 7. QQ 入口
+## 7. 社交平台入口（Channel 插件）
 
-- 走 OneBot v11/v12 协议，对接 NapCat 等实现。
+- 社交平台通过 Channel 插件接入，每个平台一个插件，核心不感知平台细节。
+- 优先支持各平台的官方机器人 API。
+- 另提供通用 OneBot v11 适配，由用户自行配置协议端。
+- 非官方协议端可能违反平台条款并导致封号，风险由使用者自行承担；本项目不提供、不推荐任何具体实现，也不引用其代码。
 - 群聊模式：被 @ 或命中触发词才回复，有冷却与每日上限。
-- 注意：非官方 QQ 协议有封号风险，建议用小号。
+- 社交入口一律按只读处理：不能从群里触发写文件或 shell（见 `docs/design/p2b.md` 第 6 节权限服务）。
 
 ## 8. 仓库结构
 
@@ -199,4 +202,4 @@ CI：先 `GOOS=android GOARCH=arm64` 编译核心，放入 `android/app/src/main
 5. MCP、Skills、记忆。
 6. Android 客户端（前台服务 + 界面）。
 7. 远程环境：InstaBox、GitHub Actions。
-8. WebUI，最后 QQ。
+8. WebUI 与社交入口（Channel 插件）。

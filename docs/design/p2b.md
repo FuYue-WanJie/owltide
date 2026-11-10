@@ -62,11 +62,11 @@ todo: 无状态字段，勾选即完成；全勾 → plan 允许置 done
 - **P2b-M2**：会话恢复注入 + context_refs 引用 + decisions 事件 + 测试
 - **P2b-M3**：`owltide goals` 列表命令 + store 报告集成
 
-### 1.6 待确认的问题
+### 1.6 已定的问题（2026-11-10）
 
-1. todo 保持会话级（不进 store）是否符合预期？是/否
-2. blocked→active 的恢复是否允许模型自主进行（还是必须用户确认）？是/否
-3. goal/plan 文件名用 `<id>.md` 还是 `<date>-<slug>.md`（id 进 frontmatter）？A: id.md / B: date-slug
+1. **是。** todo 保持会话级（不进 store）。
+2. **否。** blocked → active 必须用户确认——blocked 本身就是停下报告语义，恢复是用户的决定。
+3. **B。** 文件名 `<date>-<slug>.md`（如 `goals/20261110-add-tests.md`），id 进 frontmatter，跨文件引用一律用 id。
 
 ---
 
@@ -100,7 +100,7 @@ todo: 无状态字段，勾选即完成；全勾 → plan 允许置 done
 ### 2.3 与现有机制的关系
 
 - **sessionlog / subagent**：完全走现有 agent_start → runSession → deliver 管道，verifier 只是角色；无新代码路径
-- **decisions**：verified 事件供审计对账（可与 goal 状态迁移联动：plan 置 done 前要求存在 verdict=confirmed 的 verified 事件——见待确认问题 5）
+- **decisions**：verified 事件供审计对账（可与 goal 状态迁移联动：plan 置 done 前若要求 confirmed verdict 则发软提示——已定问题 5：M0 软提示，M5 再议硬门槛）
 - **jobs**：verifier 可用 run_shell（只读 gate），可用 job_output 读取执行者后台作业的残留输出作为证据
 
 ### 2.4 里程碑拆分
@@ -108,11 +108,11 @@ todo: 无状态字段，勾选即完成；全勾 → plan 允许置 done
 - **P2b-M4**：verifier 角色 + 描述/schema 改动 + 测试（角色形状、只读 gate 复用）
 - **P2b-M5**：verified 审计事件 + plan→done 联动校验（若问题 5 确认）+ 测试
 
-### 2.5 待确认的问题
+### 2.5 已定的问题（2026-11-10）
 
-4. verifier 是否允许 parallel（验收多个独立 claim）？是/否
-5. plan 置 done 是否强制要求 confirmed 的 verified 事件（硬门槛）？是/否（建议：M0 先软提示，M5 再收紧）
-6. verifier 的 run_shell 是否保持只读 gate（不能装依赖跑构建）？是/否
+4. **是。** verifier 允许 parallel，计入 `MaxParallel` 与预算预扣（与现有 parallel 语义一致）。
+5. **否。** M0 仅软提示（plan 置 done 无 confirmed verdict 时打提示），M5 再议硬门槛。
+6. **是。** verifier 保持只读 gate。例外：config 里用户列出的验收命令（如 `go test ./...`）允许执行——精确匹配 argv（逐参数比对，不做前缀/子串匹配），模型不能增删该列表，列表变更走 evolve 的用户确认通道。
 
 ---
 
@@ -123,7 +123,7 @@ todo: 无状态字段，勾选即完成；全勾 → plan 允许置 done
 两层压缩，均落盘可恢复（与 spill 同哲学）：
 
 - **Turn 级（已有）**：spill.Store 已把超长工具输出落盘、主上下文留摘录 + spill 引用；P2b 不动
-- **会话级（新增 compaction）**：当主上下文 token 数超过阈值（config 新字段 `budget.compact_at`，默认 max_tokens 的 70%），把最旧的已投递子代理结果对 + 已完成 turn 的工具记录折叠为一条 summary 消息
+- **会话级（新增 compaction）**：当主上下文 token 数超过阈值（config 新字段 `budget.compact_at`，默认 0.7，**分母取自第 5 节解析出的 `context_tokens`**，不再用 `budget.max_tokens`），把最旧的已投递子代理结果对 + 已完成 turn 的工具记录折叠为一条 summary 消息
 
 ```go
 // core/compaction/compaction.go
@@ -136,12 +136,12 @@ type Record struct {
 ```
 
 - 折叠摘要本身写入 `~/.owltide/compaction/<session>.jsonl`（一行一 Record），主日志不动——**sessionlog 仍是唯一事实源**，压缩只影响内存中的请求前缀
-- 摘要生成策略：M0 用模板拼接（每被折叠 turn：user 首句 + 最终 reply 首句 + 工具调用名列表），不烧 token；模型自摘要留待后续里程碑
+- 摘要生成策略：M0 用模板拼接（每被折叠 turn：user 首句 + 最终 reply 首句 + 工具调用名列表），不烧 token；模型自摘要暂缓（原 M8，见下）
 
 ### 3.2 写入位置
 
 - compaction 记录：~/.owltide/compaction/<session>.jsonl
-- 阈值配置：config.yaml `budget.compact_at`（0 = 关闭，默认 0.7 比例）
+- 阈值配置：config.yaml `budget.compact_at`（比例，0 = 关闭；默认 0.7，分母 = 第 5 节 `context_tokens`）
 - 恢复：--resume 时按 compaction 记录重建折叠前缀（sessionlog 全量重建后应用 Record）
 
 ### 3.3 与现有机制的关系
@@ -154,13 +154,13 @@ type Record struct {
 
 - **P2b-M6**：阈值检测 + turn 边界折叠 + compaction 记录落盘 + 模板摘要 + 测试
 - **P2b-M7**：--resume 重建应用折叠 + 测试
-- **P2b-M8**：（可选，待确认）模型自摘要
+- **P2b-M8**：模型自摘要——**暂缓**（已定：模板摘要先行）
 
-### 3.5 待确认的问题
+### 3.5 已定的问题（2026-11-10）
 
-7. compact_at 默认 0.7 合适吗？是/否（填数值）
-8. 模板摘要在 M0 是否足够（不引入模型自摘要的 token 成本）？是/否
-9. 折叠是否需要用户显式开关（config 默认开还是关）？A: 默认开 / B: 默认关
+7. **是。** `compact_at` 默认 0.7；分母取自第 5 节的 `context_tokens`，不再用 `max_tokens`。
+8. **是。** 模板摘要先行，模型自摘要（M8）暂缓。
+9. **A。** compaction 默认开（`compact_at: 0.7`，显式置 0 关闭）。
 
 ---
 
@@ -182,11 +182,11 @@ source: session:<id>           # 产生该记忆的会话
 ```
 
 - 记忆文件：`~/.owltide/memories/<scope>/<id>.md`（目录已存在于 runtime state，当前为空壳）
-- 注入：系统提示尾部追加「Relevant memories」块，按 tags 与当前任务词重叠度选 top-K（K=5，M0 用词面匹配，无向量）；注入内容进前缀 hash，故**每会话只注入一次**（会话开始时定型，中途不换）
+- 注入：系统提示尾部追加「Relevant memories」块。M0 全量注入最新 20 条（总长度设上限，超限按截断保留最新）；超过 20 条时才做词面 top-K（按 tags 与当前任务词重叠度，无向量）。注入内容进前缀 hash，故**每会话只注入一次**（会话开始时定型，中途不换）
 
 ### 4.2 写入位置
 
-- 工具 `memory_save`（主代理 registry，白名单进 router AllowedTools）：正文 + tags 必填，scope 默认 project
+- 工具 `memory_save`（主代理 registry，白名单进 router AllowedTools）：正文 + tags 必填，scope 默认 project；写入前进第 6 节权限服务的待审批队列，可选「本会话自动同意」
 - 工具 `memory_forget`（按 id，soft delete → status: archived frontmatter 字段）
 - 去重：同 scope 下正文 sha256 相同则拒绝（幂等）
 
@@ -199,17 +199,17 @@ source: session:<id>           # 产生该记忆的会话
 ### 4.4 里程碑拆分
 
 - **P2b-M9**：memory_save/forget + 注入（词面 top-K）+ 去重 + guard 保护 + 测试
-- **P2b-M10**：（可选，待确认）`owltide memories` 列表/清理命令
+- **P2b-M10**：`owltide memories` 列表/清理命令——未排期（本轮未答复，随 M9 一起再议）
 
-### 4.5 待确认的问题
+### 4.5 已定的问题（2026-11-10）
 
-10. 注入用词面 top-K（M0）还是直接全量注入前 N 条（更简单）？A: 词面 / B: 全量前 N
-11. memory_save 是否需要用户确认（防止模型记错东西）？是/否
-12. memories 是否允许子代理写（建议：只读，主代理汇总后写）？是/否
+10. **B。** 全量注入最新 20 条，总长度设上限；超过 20 条再做词面 top-K。
+11. **是。** `memory_save` 走第 6 节权限服务的待审批队列，可选「本会话自动同意」。
+12. **是。** 子代理只读 memories，主代理汇总后写。
 
 ---
 
-## 5. 模型参数自动匹配（待用户确认是否纳入）
+## 5. 模型参数自动匹配（已定：纳入，排在压缩之前——压缩阈值依赖它）
 
 ### 5.1 动机
 
@@ -224,8 +224,9 @@ config.yaml 只配 model.name + base_url；context window / max output / 图像 
 4. 保守默认值      context 32768 / max_output 4096 / images=false / tools=true
 ```
 
-- 每级结果记录到 decisions（`{event: "model_limits", source, ...}`），启动日志打印一行来源，便于排查
-- /models 探测失败（网络/不支持）静默降级到下一级，不阻塞启动
+- 用户配置命中 / 内置表命中：启动日志打印一行来源（不落盘、不进提交）
+- /models 探测结果按模型名缓存（进程内，含失败负缓存）；探测结果**不进日志、不进提交**
+- 探测默认开启（已定）；失败（网络/不支持）静默降级到下一级，不阻塞启动
 
 ### 5.3 数据结构
 
@@ -244,34 +245,107 @@ type ModelLimits struct {
 
 ### 5.4 与现有机制的关系
 
-- **config**：Model struct 加 Limits 字段；Load 时按四级回退解析一次
-- **decision**：来源审计
-- **compaction（第 3 节）**：阈值基于 ContextTokens
+- **config**：Model struct 加 Limits 字段；Load 时按四级回退解析一次（用户配置始终优先）
+- **compaction（第 3 节）**：阈值基于 ContextTokens；解析顺序排在压缩之前
+- **内置表**：小表（仅常见模型族），每项注明来源与录入日期，会随时间过期——用户配置始终优先
 - 不引入网络依赖的新库：/models 用现有 model.Client 的 HTTP 栈
 
-### 5.5 里程碑拆分（若纳入）
+### 5.5 里程碑拆分
 
-- **P2b-M11**：ModelLimits 结构 + 四级回退 + decisions 审计 + 测试（httptest 模拟 /models）
+- **P2b-M11**：ModelLimits 结构 + 四级回退 + 探测缓存 + 测试（httptest 模拟 /models）
 - **P2b-M12**：budget/compaction 接入 ContextTokens + tools=false 快速失败
 
-### 5.6 待确认的问题
+### 5.6 已定的问题（2026-11-10）
 
-13. 本节是否纳入 P2b 范围？是/否
-14. 内置表是否接受（模型族前缀 → 参数的静态映射，会随时间过期）？是/否
-15. /models 探测是否需要用户显式开启（避免对私有端点发额外请求）？是/否
+13. **是。** 纳入 P2b 范围，且排在压缩之前做（压缩阈值依赖 context_tokens）。
+14. **是。** 内置表接受，但要小：仅常见模型族，每项注明来源与录入日期；用户配置始终优先。
+15. **否。** 不需要显式开启——默认探测，按模型名缓存，失败静默回退；探测结果不进日志和提交。
 
 ---
 
-## 附：里程碑总览
+## 6. 权限服务
 
-| 里程碑 | 内容 | 依赖 |
-|--------|------|------|
-| M1 | goal/plan/todo 格式+工具+guard | — |
-| M2 | 会话恢复注入 + context_refs + decisions | M1 |
-| M3 | owltide goals 命令 | M1 |
-| M4 | verifier 角色 | — |
-| M5 | verified 事件 + done 联动 | M4, M1 |
-| M6 | compaction 折叠+落盘 | — |
-| M7 | resume 应用折叠 | M6 |
-| M9 | memory 工具+注入 | — |
-| M11/M12 | 模型参数匹配（待确认） | — |
+状态：已定，执行顺序第 2（先于所有"写"里程碑，也先于 serve 写接口与 UI 接入）
+
+### 6.1 定位
+
+一个独立包（CLI、serve、将来的 TUI 共用），一张表统一管理所有"等用户"的状态：越权审批、ask_user、计划批准、memory_save。任何端（终端、SSE 客户端、未来的 TUI）都通过同一张表领取和回答请求——不允许每个入口各有一套"等用户"逻辑。
+
+### 6.2 数据结构
+
+```go
+// internal/perm（包名暂定）
+type Kind string // approval | ask_user | plan_approval | memory_save
+
+const (
+    KindApproval     Kind = "approval"      // 越权/危险动作审批（含 router 越权的放行请求）
+    KindAskUser      Kind = "ask_user"      // 主代理提问
+    KindPlanApproval Kind = "plan_approval" // 计划批准
+    KindMemorySave   Kind = "memory_save"   // 跨会话记忆写入
+)
+
+type Request struct {
+    ID      string    // 递增 id：req-<seq>
+    Kind    Kind
+    Source  Source    // 来源
+    Payload any       // 类型相关的请求体（命令 argv、问题文本、plan id、memory 正文）
+    Created time.Time
+    State   State     // pending | approved | denied | timeout | cancelled
+    Answered time.Time
+    By      string    // 回答端标识（tty / serve:<client> / auto-session）
+}
+
+type Source struct {
+    Agent   string // "main" 或子代理 id（sub-xxxx）
+    Role    string // 角色名（general/explore/…）
+    Session string
+}
+
+type State string // pending | approved | denied | timeout | cancelled
+```
+
+- 请求只存内存，进程退出即清空（跨会话记忆针对的是记忆本身，不是待审批队列）
+- 终态四类：**同意、拒绝、超时、已取消**（用户显式取消或会话结束）
+
+### 6.3 并发与"本会话允许"
+
+- 多端同时在线：**先到先得**。第一个回答端把请求置终态；后到的端收到"已处理"（含终态与回答端标识），不能重复决定。
+- "本会话允许"（session allow）：按**具体命令**记录（精确 argv 相等才匹配），可列出（`owltide allow --list` 或 SSE 事件）、可撤销；进程/会话结束即失效。
+- **不做**按类别（如"所有 shell 命令"）或跨会话的永久授权；危险请求（删除、强推、受保护文件写入）超时默认**拒绝**，非危险请求超时默认拒绝同样适用（一律默认拒绝，安全侧兜底）。
+- 社交入口（Channel 插件）来的请求一律按只读处理：**不能从群里触发写文件或 shell**——社交入口只能 ask_user 式的纯文本回答，写类审批在社交入口直接以"该操作不允许从群聊发起"拒绝。
+
+### 6.4 与现有机制的关系
+
+- **ask_user**：现有 `agent.AskUserTool` 迁到权限服务上（KindAskUser）；交互终端、serve SSE、未来 TUI 都是"端"，同一请求只有一个答案。
+- **guard / confirmFromStdin**：现有 `tool.Confirmer` 接口保留，实现切到权限服务（KindApproval）——危险动作的确认不再绑定 stdin。
+- **subagent**：子代理请求审批时，Source 带子代理 id 与角色（审计可追溯）；回答后结果经现有 tool 结果通道回到子代理。
+- **decisions**：每个终态写一条 `{event: "permission", id, kind, state, by, source}` 审计事件，供对账。
+- **serve**：审批类事件走 SSE 必达通道（见 `serve-api.md`），不进"慢客户端丢帧"路径。
+- **evolve**：`allowlist`（本会话允许的列表本身）不写盘、不进 store，避免模型自我扩权。
+
+### 6.5 里程碑拆分
+
+- **P2b-M13**：包结构 + 表 + 状态机 + 先到先得 + 超时默认拒绝 + decisions 事件 + 测试
+- **P2b-M14**：ask_user / guard confirmer 迁移到权限服务（行为兼容）+ 测试
+- **P2b-M15**：session allow（按命令、列出、撤销）+ 社交入口只读限制 + 测试
+- **P2b-M16**：serve SSE 审批必达通道 + Last-Event-ID 补发接线（与 serve-api.md 同步）+ 测试
+
+### 6.6 已定的问题
+
+无待确认事项（本轮已定）。
+
+---
+
+## 附：里程碑总览（2026-11-10 更新执行顺序）
+
+| 执行顺序 | 里程碑 | 内容 | 依赖 |
+|----------|--------|------|------|
+| 1 | M11/M12 | 模型参数自动匹配（原排最后，提前：压缩阈值依赖 context_tokens） | — |
+| 2 | 权限服务 | 第 6 节，新（包名暂定 core/perm 或 internal/perm，随实现定） | — |
+| 3 | M1、M2 | goal/plan/todo 格式+工具+guard；会话恢复注入 + context_refs（M3 的 `owltide goals` 命令可延后） | 权限服务先于写工具类里程碑 |
+| 4 | M6、M7 | compaction 折叠+落盘；resume 应用折叠（M8 自摘要暂缓） | M11/M12 |
+| 5 | M4、M5 | verifier 角色；verified 事件 + done 联动（软提示） | M1 |
+| 6 | M9 | 跨会话记忆（memory_save 走权限服务） | 权限服务 |
+
+- 约束：**权限服务完成后再做 serve 写接口和 UI 接入**（写接口的审批必须走权限服务，不另起炉灶）。
+- 未排期：M3 `owltide goals` 命令（延后）、M8 模型自摘要（暂缓）、M10 `owltide memories` 命令（原可选，未排期）。

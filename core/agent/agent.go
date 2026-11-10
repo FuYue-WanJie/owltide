@@ -116,6 +116,12 @@ type Agent struct {
 	loops *loopDetector
 	// loopStopped marks a loop-detector termination for the log.
 	loopStopped bool
+	// routerStrikes counts CONSECUTIVE router-mode violations within
+	// one run turn; an allowed tool call resets it. Three in a row end
+	// the turn (routerStopped) instead of feeding the model another
+	// refusal it can ignore — same shape as the loop detector.
+	routerStrikes int
+	routerStopped bool
 }
 
 // New creates an Agent with the system prompt in place. The request
@@ -326,6 +332,9 @@ func (a *Agent) Run(ctx context.Context, userText string) (string, error) {
 			}
 		}
 	}
+	// Reset the per-turn router-violation strike counter.
+	a.routerStrikes = 0
+	a.routerStopped = false
 
 	a.logMsg(model.Message{Role: model.RoleUser, Content: userText})
 
@@ -424,6 +433,12 @@ func (a *Agent) Run(ctx context.Context, userText string) (string, error) {
 			abortReason = "loop_stop"
 			break
 		}
+		if a.routerStopped {
+			final = a.wrapUp("router mode: three consecutive tool refusals; the main agent must delegate, not execute")
+			runErr = fmt.Errorf("router mode: run stopped after 3 consecutive tool refusals (see decisions log)")
+			abortReason = "router_violation_limit"
+			break
+		}
 	}
 	if abortReason != "" && a.opts.OnRunEnd != nil {
 		a.opts.OnRunEnd(abortReason)
@@ -492,19 +507,27 @@ func (a *Agent) execTool(ctx context.Context, tc model.ToolCall) decision.ToolRe
 
 	// Router mode: second enforcement layer. The registry already
 	// hides the tools; this catches hard-calls by name and refuses
-	// them with guidance, then reports through the audit sink.
+	// them with guidance, then reports through the audit sink. Three
+	// consecutive violations end the turn: more refusals only burn
+	// budget, the model has demonstrated it will not delegate.
 	if !a.routerAllowed(tc.Function.Name) {
+		a.routerStrikes++
 		rec := decision.ToolRecord{Name: tc.Function.Name, Error: "router mode refusal"}
 		a.logMsg(model.Message{
 			Role: model.RoleTool, Name: tc.Function.Name,
 			ToolCallID: tc.ID,
-			Content:    "router 模式下请委派子代理（agent_start），主代理不执行 " + tc.Function.Name,
+			Content: fmt.Sprintf("你在路由模式，不能执行 %s。请用 agent_start 委派 general"+
+				"（写文件、跑命令都委派它）；只读调查可委派 explore 或 review。", tc.Function.Name),
 		})
+		if a.routerStrikes >= 3 {
+			a.routerStopped = true
+		}
 		if a.opts.OnRouterViolation != nil {
 			a.opts.OnRouterViolation(tc.Function.Name)
 		}
 		return rec
 	}
+	a.routerStrikes = 0 // an allowed call breaks the violation streak
 
 	result, err := "tool not found", fmt.Errorf("tool %q not found", tc.Function.Name)
 	if t, ok := a.opts.Tools.Get(tc.Function.Name); ok {
@@ -608,6 +631,9 @@ func (a *Agent) logTurn(start time.Time, input string, tools []decision.ToolReco
 	case a.loopStopped:
 		outcome = decision.OutcomeError
 		errMsg = "loop stop: repeated identical tool call (reminder ignored)"
+	case a.routerStopped:
+		outcome = decision.OutcomeError
+		errMsg = "router stop: 3 consecutive tool refusals (model kept executing instead of delegating)"
 	case err != nil:
 		outcome = decision.OutcomeError
 		errMsg = err.Error()

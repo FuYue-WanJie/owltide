@@ -879,14 +879,62 @@ func TestRouterModeExecutorRefusal(t *testing.T) {
 	if len(violations) != 1 || violations[0] != "write_file" {
 		t.Fatalf("violation audit missing: %v", violations)
 	}
-	// The refusal text reached the model as the tool result.
-	msgs, _, err := sessionlog.RebuildWithWarning(filepath.Join(t.TempDir(), "none"))
-	_ = msgs
-	_ = err
+	// The refusal text reached the model as the tool result, and it
+	// names the router constraint and the delegation target directly.
 	for _, m := range a.messages {
-		if m.Role == model.RoleTool && strings.Contains(m.Content, "router 模式下请委派子代理") {
+		if m.Role == model.RoleTool && strings.Contains(m.Content, "你在路由模式") &&
+			strings.Contains(m.Content, "agent_start 委派 general") {
 			return
 		}
 	}
 	t.Fatalf("refusal text missing from messages")
+}
+
+// TestRouterViolationLimitEndsTurn: three CONSECUTIVE executor refusals
+// end the run with an error and a wrap-up summary (feeding more
+// refusals only burns budget); an allowed call in between resets the
+// streak.
+func TestRouterViolationLimitEndsTurn(t *testing.T) {
+	var violations []string
+	var abortReason string
+	reg := tool.NewRegistry()
+	must(reg.Register(&tool.WriteFile{}))
+	must(reg.Register(TodoTool{Dir: t.TempDir()}))
+
+	cfg := config.Default()
+	cfg.Model.BaseURL = "https://x"
+	cfg.Mode = "router"
+	// Script: violation, allowed (reset), then three violations in a
+	// row -> stop; the final call is the tool-less wrap-up.
+	srv := fakeLLM(t, 6, func(k int, req model.Request) string {
+		switch k {
+		case 1:
+			return toolCallJSON("v1", "write_file", `{"path":"x.txt","content":"no"}`)
+		case 2: // allowed: todo (in AllowedTools)
+			return toolCallJSON("ok", "todo", `{"items":["step one"]}`)
+		case 3, 4, 5:
+			return toolCallJSON("v"+itoa(k), "run_shell", `{"command":"echo hi"}`)
+		}
+		return textChunk("stopped summary")
+	})
+	opts := agentOptions(cfg, model.NewClient(srv.URL, "k", nil), reg, nil)
+	opts.RouterMode = true
+	opts.AllowedTools = []string{"agent_start", "agent_status", "agent_result", "agent_send", "todo", "ask_user"}
+	opts.OnRouterViolation = func(name string) { violations = append(violations, name) }
+	opts.OnRunEnd = func(reason string) { abortReason = reason }
+	a := New(opts)
+	final, err := a.Run(context.Background(), "do something")
+	if err == nil || !strings.Contains(err.Error(), "3 consecutive tool refusals") {
+		t.Fatalf("run must stop after 3 consecutive refusals: %v", err)
+	}
+	if abortReason != "router_violation_limit" {
+		t.Fatalf("abort reason = %q, want router_violation_limit", abortReason)
+	}
+	// 1 violation, reset by allowed call, then 3 -> four audit events.
+	if len(violations) != 4 {
+		t.Fatalf("violation audit = %d events (%v), want 4 (streak reset verified)", len(violations), violations)
+	}
+	if !strings.Contains(final, "stopped summary") {
+		t.Fatalf("final summary missing: %q", final)
+	}
 }

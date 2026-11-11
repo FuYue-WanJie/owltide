@@ -33,9 +33,9 @@ type Sessions struct {
 
 // SessionInfo is one entry of the session list.
 type SessionInfo struct {
-	ID        string `json:"id"`
-	Messages  int    `json:"messages"`
-	Modified  string `json:"modified"`
+	ID       string `json:"id"`
+	Messages int    `json:"messages"`
+	Modified string `json:"modified"`
 }
 
 // List returns all sessions, newest first.
@@ -124,9 +124,9 @@ func validID(id string) bool {
 // CLI wires it to narrow adapters so serve never imports subagent (no
 // key/endpoint reach).
 type State struct {
-	mu       sync.Mutex
-	subs     func() []map[string]any
-	jobs     func() []map[string]any
+	mu   sync.Mutex
+	subs func() []map[string]any
+	jobs func() []map[string]any
 }
 
 // SetWiring installs the snapshot functions (called once at startup).
@@ -221,7 +221,7 @@ func (s *Server) handleJobs(w http.ResponseWriter, _ *http.Request) {
 // ---- SSE ----
 
 type hub struct {
-	mu    sync.Mutex
+	mu      sync.Mutex
 	clients map[chan []byte]struct{}
 }
 

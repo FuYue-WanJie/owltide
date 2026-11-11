@@ -938,3 +938,33 @@ func TestRouterViolationLimitEndsTurn(t *testing.T) {
 		t.Fatalf("final summary missing: %q", final)
 	}
 }
+
+// TestMaxTokensDerivesFromResolvedLimits: with no explicit run budget,
+// the cap derives from the resolved model context window (P2b M12);
+// an explicit budget.max_tokens always wins; with no resolution at all
+// the legacy 400k fallback applies.
+func TestMaxTokensDerivesFromResolvedLimits(t *testing.T) {
+	reg := tool.NewRegistry()
+	cfg := config.Default()
+	cfg.Budget.MaxTokens = 0
+
+	// No resolution: legacy fallback.
+	a := New(agentOptions(cfg, model.NewClient("https://x", "k", nil), reg, nil))
+	if got := a.maxTokens(); got != 400_000 {
+		t.Fatalf("no-resolution fallback = %d, want 400000", got)
+	}
+
+	// Resolved context window becomes the run cap.
+	cfg.Model.Resolved = &config.Resolved{Limits: config.Limits{ContextTokens: 50000}}
+	a = New(agentOptions(cfg, model.NewClient("https://x", "k", nil), reg, nil))
+	if got := a.maxTokens(); got != 50000 {
+		t.Fatalf("resolved fallback = %d, want 50000", got)
+	}
+
+	// Explicit budget wins over resolution.
+	cfg.Budget.MaxTokens = 123
+	a = New(agentOptions(cfg, model.NewClient("https://x", "k", nil), reg, nil))
+	if got := a.maxTokens(); got != 123 {
+		t.Fatalf("explicit budget = %d, want 123", got)
+	}
+}

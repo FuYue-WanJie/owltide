@@ -39,6 +39,7 @@ Usage:
                           --router delegates everything to sub-agents)
   owltide run [--resume <session-id>] [--router] "task"
                           run one task and exit (optionally resumed)
+  owltide model info      show resolved model limits and where each came from
   owltide serve [--addr 127.0.0.1:7877]
                           read-only HTTP API over runtime state (sessions,
                           sub-agents, jobs, SSE events); binds localhost only
@@ -60,6 +61,8 @@ func main() {
 		fmt.Println("wrote", config.Path())
 	case "sessions":
 		listSessions()
+	case "model":
+		runModelInfo(os.Args[2:])
 	case "serve":
 		runServe(os.Args[2:])
 	case "chat":
@@ -252,6 +255,13 @@ func setup(resumeID string, router bool) (agent.Options, func(), *subagent.Manag
 	if key == "" {
 		return agent.Options{}, nil, nil, fmt.Errorf(
 			"API key empty: set $%s", cfg.Model.APIKeyEnv)
+	}
+	// P2b M11: resolve model limits once per process — per-field
+	// fallback config -> /models probe -> builtin table -> defaults.
+	// Probe results and the endpoint address are never logged.
+	cfg.Model.Resolved = resolveLimits(cfg.Model, key)
+	if note := limitsSourceNote(*cfg.Model.Resolved); note != "" {
+		fmt.Fprintln(os.Stderr, "note: model limits:", note)
 	}
 	p := platform.New()
 	home := p.Home()
@@ -620,4 +630,42 @@ func isLoopbackAddr(addr string) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback() || host == "localhost"
+}
+
+// resolveLimits performs the four-level model-parameter resolution
+// (config -> /models probe -> builtin table -> defaults) with probing
+// enabled whenever a key is available.
+func resolveLimits(m config.Model, key string) *config.Resolved {
+	r := config.ResolveLimits(m, config.ResolveOptions{
+		ProbeEndpoint: key != "",
+		APIKey:        key,
+	})
+	return &r
+}
+
+// limitsSourceNote is a one-line, address-free summary of the
+// non-default sources (empty when everything came from defaults).
+func limitsSourceNote(r config.Resolved) string {
+	var parts []string
+	for _, f := range []string{"context_tokens", "max_output", "images", "tools", "audio", "video"} {
+		if src := r.Sources[f]; src != "" && src != config.SourceDefault {
+			parts = append(parts, f+"="+string(src))
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+// runModelInfo prints the resolved model parameters with their source
+// levels. It never prints the endpoint address, the key, or probe
+// payloads.
+func runModelInfo(args []string) {
+	if len(args) == 0 || args[0] != "info" {
+		fmt.Println("usage: owltide model info")
+		os.Exit(2)
+	}
+	cfg, err := config.Load()
+	must(err)
+	key := cfg.APIKey()
+	r := resolveLimits(cfg.Model, key)
+	fmt.Print(config.FormatModelInfo(cfg.Model.Name, *r))
 }

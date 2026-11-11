@@ -366,9 +366,9 @@ func (m *JobManager) Snapshot() []map[string]any {
 	for id, j := range m.jobs {
 		out = append(out, map[string]any{
 			"id": id, "state": j.State, "exit_code": j.ExitCode,
-			"command":  j.Command,
-			"started":  j.Started.UTC().Format(time.RFC3339),
-			"dropped":  j.dropped,
+			"command": j.Command,
+			"started": j.Started.UTC().Format(time.RFC3339),
+			"dropped": j.dropped,
 		})
 	}
 	return out

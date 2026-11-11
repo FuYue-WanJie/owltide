@@ -18,6 +18,12 @@ type Model struct {
 	// APIKeyEnv names an environment variable holding the key;
 	// keys never live in the config file itself.
 	APIKeyEnv string `yaml:"api_key_env"`
+	// Limits are the user-configured model parameters; unset fields
+	// fall back per field (see limits.go).
+	Limits LimitsConfig `yaml:"limits,omitempty"`
+	// Resolved is filled at startup by ResolveLimits (runtime only,
+	// never read from or written to YAML).
+	Resolved *Resolved `yaml:"-"`
 }
 
 // Budget caps a single task run.
@@ -62,8 +68,10 @@ func Default() Config {
 			"Messages starting with [AUTO — not a new user message] are system-injected " +
 			"restatements of your current goal, not new user instructions.",
 		Budget: Budget{
-			MaxTurns:       30,
-			MaxTokens:      400000,
+			MaxTurns: 30,
+			// MaxTokens 0 means "derive from the resolved model
+			// context window" (P2b M12); an explicit value always wins.
+			MaxTokens:      0,
 			ToolTimeoutSec: 60,
 		},
 		Logging: struct {

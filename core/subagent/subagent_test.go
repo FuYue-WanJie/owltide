@@ -109,6 +109,10 @@ func newFixture(t *testing.T, script func(n int, req model.Request) string, o fx
 	srv := fakeLLM2(t, script)
 
 	cfg := config.Default()
+	// The fixture pins an explicit run budget so reservation arithmetic
+	// is exact (production default derives from the resolved context
+	// window when unset).
+	cfg.Budget.MaxTokens = 400000
 	reg := tool.NewRegistry()
 	reg.SetConfirmer(o.confirm)
 	workDir := t.TempDir()

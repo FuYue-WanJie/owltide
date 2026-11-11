@@ -241,7 +241,7 @@ type ModelLimits struct {
 }
 ```
 
-- 用途：budget 计算按比例取 context（compaction 阈值、token budget 上限校验）；images=false 时 multimodal 工具不注册；tools=false 启动即报错（当前架构强依赖 tool call）
+- 用途：`context_tokens` 只给压缩阈值（compact_at）和将来的请求前检查用；`images`/`tools`/`audio`/`video` 只记录不使用（能力路由与技能 requires 是后续里程碑）。**不参与运行预算**——budget.max_tokens 是单次运行的累计预算，与 context_tokens 是两个量纲，互不推导（2026-11-11 修正）。
 
 ### 5.4 与现有机制的关系
 

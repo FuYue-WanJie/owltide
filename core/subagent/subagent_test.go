@@ -82,6 +82,9 @@ type fixture struct {
 
 type fxOpts struct {
 	confirm tool.Confirmer
+	// modelResolved, when set, is wired into the parent's config before
+	// construction (simulates startup resolution for an unknown model).
+	modelResolved *config.Resolved
 }
 
 func newFixture(t *testing.T, script func(n int, req model.Request) string, o fxOpts) *fixture {
@@ -110,9 +113,12 @@ func newFixture(t *testing.T, script func(n int, req model.Request) string, o fx
 
 	cfg := config.Default()
 	// The fixture pins an explicit run budget so reservation arithmetic
-	// is exact (production default derives from the resolved context
-	// window when unset).
+	// is exact (the budget is independent of the context window).
 	cfg.Budget.MaxTokens = 400000
+	if o.modelResolved != nil {
+		cfg.Model.Name = "unknown-model-xyz"
+		cfg.Model.Resolved = o.modelResolved
+	}
 	reg := tool.NewRegistry()
 	reg.SetConfirmer(o.confirm)
 	workDir := t.TempDir()
@@ -1680,4 +1686,40 @@ func TestContextCancelFiresOnRunEnd(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatal("background job still running after context-cancelled run")
+}
+
+// TestDefaultBudgetReservesGeneral: with the default config (no
+// explicit max_tokens) and an unknown model whose resolution produced
+// the conservative defaults (context 32768), the cumulative run budget
+// stays 400000 — NOT derived from the context window — and a general
+// sub-agent's 150000 reservation succeeds.
+func TestDefaultBudgetReservesGeneral(t *testing.T) {
+	f := newFixture(t, nil, fxOpts{
+		modelResolved: &config.Resolved{Limits: config.Limits{ContextTokens: 32768}},
+	})
+	if f.m.opts.Config.Model.Resolved == nil ||
+		f.m.opts.Config.Model.Resolved.Limits.ContextTokens != 32768 {
+		t.Fatal("fixture must carry the unknown-model resolution")
+	}
+	if got := f.parent.RemainingTokens(); got != 400000 {
+		t.Fatalf("parent budget = %d, want 400000", got)
+	}
+
+	// Reserving a general sub-agent (150000) must succeed under the
+	// default budget despite the 32768-token context window.
+	def := f.agents["general"]
+	if def.Budget.MaxTokens != 150000 {
+		t.Fatalf("general budget = %d, want 150000", def.Budget.MaxTokens)
+	}
+	release, err := f.m.reserve(def)
+	if err != nil {
+		t.Fatalf("general reservation refused under default budget: %v", err)
+	}
+	if got := f.parent.RemainingTokens(); got != 400000-150000 {
+		t.Fatalf("after reservation = %d, want 250000", got)
+	}
+	release()
+	if got := f.parent.RemainingTokens(); got != 400000 {
+		t.Fatalf("after release = %d, want 400000", got)
+	}
 }

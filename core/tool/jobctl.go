@@ -55,6 +55,11 @@ type Job struct {
 	cmd      *exec.Cmd
 	cancel   func()
 	killFunc func(*exec.Cmd) // platform-specific group kill
+	// ioDone closes when the output reader drains the pipe. Terminal
+	// state is only published after it drains, so a reader that sees a
+	// terminal job always sees the complete output tail.
+	ioDone    chan struct{}
+	finishing bool
 }
 
 // snapshot is a consistent view of a job's output tail.
@@ -99,20 +104,41 @@ func (j *Job) snap(since int64) snapshot {
 	}
 }
 
+// JobDrainTimeout bounds how long a terminal transition waits for the
+// output reader to drain the pipe (a grandchild may hold it open).
+const JobDrainTimeout = 2 * time.Second
+
+// finish publishes the terminal state. It kills the process group,
+// waits (bounded) for the output reader to drain the pipe, and only
+// then marks the job terminal — so state=terminal implies the ring
+// buffer holds every byte the pipe produced. First caller wins;
+// concurrent callers (kill vs watchdog) return immediately.
 func (j *Job) finish(state string, code int) {
 	j.mu.Lock()
-	if j.State != JobRunning {
+	if j.State != JobRunning || j.finishing {
 		j.mu.Unlock()
 		return
 	}
-	j.State = state
-	j.ExitCode = code
-	j.Ended = time.Now()
-	cmd, kill := j.cmd, j.killFunc
+	j.finishing = true
+	cmd, kill, ioDone := j.cmd, j.killFunc, j.ioDone
 	j.mu.Unlock()
+
 	if cmd != nil && kill != nil {
 		kill(cmd)
 	}
+	if ioDone != nil {
+		select {
+		case <-ioDone:
+		case <-time.After(JobDrainTimeout):
+		}
+	}
+
+	j.mu.Lock()
+	j.State = state
+	j.ExitCode = code
+	j.Ended = time.Now()
+	j.finishing = false
+	j.mu.Unlock()
 }
 
 // JobManager owns all background jobs of one session.
@@ -183,12 +209,15 @@ func (m *JobManager) Start(bin, flag, command, dir string, timeout time.Duration
 		j.finish(JobFailed, -1)
 		return "", fmt.Errorf("job start: %w", err)
 	}
+	ioDone := make(chan struct{})
 	j.mu.Lock()
 	j.cmd = cmd
 	j.killFunc = killJobProcessGroup
+	j.ioDone = ioDone
 	j.mu.Unlock()
 
 	go func() {
+		defer close(ioDone)
 		defer pipe.Close()
 		buf := make([]byte, 32<<10)
 		for {

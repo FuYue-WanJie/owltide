@@ -939,29 +939,34 @@ func TestRouterViolationLimitEndsTurn(t *testing.T) {
 	}
 }
 
-// TestMaxTokensDerivesFromResolvedLimits: with no explicit run budget,
-// the cap derives from the resolved model context window (P2b M12);
-// an explicit budget.max_tokens always wins; with no resolution at all
-// the legacy 400k fallback applies.
-func TestMaxTokensDerivesFromResolvedLimits(t *testing.T) {
+// TestRunBudgetIndependentOfContextWindow: budget.max_tokens is the
+// cumulative per-run token budget and must NOT be derived from the
+// model context window (context_tokens feeds compaction and future
+// pre-request checks only). Unset budget -> 400k default regardless of
+// resolution; an explicit value always wins.
+func TestRunBudgetIndependentOfContextWindow(t *testing.T) {
 	reg := tool.NewRegistry()
+
+	// Unset budget with a small resolved window: still 400k — a
+	// 32768-context unknown model must not shrink the run budget
+	// (sub-agent reservations like general's 150k must stay possible).
 	cfg := config.Default()
 	cfg.Budget.MaxTokens = 0
-
-	// No resolution: legacy fallback.
+	cfg.Model.Resolved = &config.Resolved{Limits: config.Limits{ContextTokens: 32768}}
 	a := New(agentOptions(cfg, model.NewClient("https://x", "k", nil), reg, nil))
 	if got := a.maxTokens(); got != 400_000 {
-		t.Fatalf("no-resolution fallback = %d, want 400000", got)
+		t.Fatalf("unset budget with small context = %d, want 400000", got)
 	}
 
-	// Resolved context window becomes the run cap.
-	cfg.Model.Resolved = &config.Resolved{Limits: config.Limits{ContextTokens: 50000}}
-	a = New(agentOptions(cfg, model.NewClient("https://x", "k", nil), reg, nil))
-	if got := a.maxTokens(); got != 50000 {
-		t.Fatalf("resolved fallback = %d, want 50000", got)
+	// Resolution absent entirely: same 400k.
+	cfg2 := config.Default()
+	cfg2.Budget.MaxTokens = 0
+	a = New(agentOptions(cfg2, model.NewClient("https://x", "k", nil), reg, nil))
+	if got := a.maxTokens(); got != 400_000 {
+		t.Fatalf("unset budget no resolution = %d, want 400000", got)
 	}
 
-	// Explicit budget wins over resolution.
+	// Explicit value always wins.
 	cfg.Budget.MaxTokens = 123
 	a = New(agentOptions(cfg, model.NewClient("https://x", "k", nil), reg, nil))
 	if got := a.maxTokens(); got != 123 {

@@ -311,16 +311,13 @@ func (a *Agent) maxTurns() int {
 	return 30
 }
 
-// maxTokensFallback guards against an unset budget. When the run budget
-// is not configured explicitly, the resolved model context window is
-// the cap (P2b M12); the hardcoded 400k value remains as the last
-// resort when resolution is unavailable.
+// maxTokensFallback guards against an unset budget. budget.max_tokens is
+// the cumulative per-run token budget and is deliberately INDEPENDENT of
+// the model context window (resolved context_tokens feeds compaction and
+// future pre-request checks only, never this cap).
 func (a *Agent) maxTokens() int {
 	if a.opts.Config.Budget.MaxTokens > 0 {
 		return a.opts.Config.Budget.MaxTokens
-	}
-	if r := a.opts.Config.Model.Resolved; r != nil && r.Limits.ContextTokens > 0 {
-		return r.Limits.ContextTokens
 	}
 	return 400_000
 }

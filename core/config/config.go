@@ -69,9 +69,9 @@ func Default() Config {
 			"restatements of your current goal, not new user instructions.",
 		Budget: Budget{
 			MaxTurns: 30,
-			// MaxTokens 0 means "derive from the resolved model
-			// context window" (P2b M12); an explicit value always wins.
-			MaxTokens:      0,
+			// Cumulative per-run token budget. Independent of the
+			// model context window (which feeds compaction only).
+			MaxTokens:      400000,
 			ToolTimeoutSec: 60,
 		},
 		Logging: struct {

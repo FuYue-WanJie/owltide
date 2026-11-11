@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -36,15 +37,33 @@ type Budget struct {
 	ToolTimeoutSec int `yaml:"tool_timeout_sec"`
 }
 
+// Permissions configures the permission service (P2b-M13).
+type Permissions struct {
+	// TimeoutSec bounds how long a permission request may stay
+	// pending; expiry resolves it as a denial (state=timeout).
+	// <=0 means the 300s default.
+	TimeoutSec int `yaml:"timeout_sec"`
+}
+
 // Config is the on-disk configuration.
 type Config struct {
-	Model   Model  `yaml:"model"`
-	System  string `yaml:"system_prompt"`
-	Budget  Budget `yaml:"budget"`
-	Mode    string `yaml:"mode"` // "": standard; "router": delegate-only
-	Logging struct {
+	Model       Model       `yaml:"model"`
+	System      string      `yaml:"system_prompt"`
+	Budget      Budget      `yaml:"budget"`
+	Mode        string      `yaml:"mode"` // "": standard; "router": delegate-only
+	Permissions Permissions `yaml:"permissions"`
+	Logging     struct {
 		Decisions bool `yaml:"decisions"`
 	} `yaml:"logging"`
+}
+
+// PermissionTimeout is the effective pending timeout (default 300s).
+func (c Config) PermissionTimeout() time.Duration {
+	sec := c.Permissions.TimeoutSec
+	if sec <= 0 {
+		sec = 300
+	}
+	return time.Duration(sec) * time.Second
 }
 
 // Router reports whether router mode is on (config mode: router or the
@@ -74,6 +93,7 @@ func Default() Config {
 			MaxTokens:      400000,
 			ToolTimeoutSec: 60,
 		},
+		Permissions: Permissions{TimeoutSec: 300},
 		Logging: struct {
 			Decisions bool `yaml:"decisions"`
 		}{Decisions: true},

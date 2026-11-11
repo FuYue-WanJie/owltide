@@ -306,6 +306,8 @@ type State string // pending | approved | denied | timeout | cancelled
 
 - 请求只存内存，进程退出即清空（跨会话记忆针对的是记忆本身，不是待审批队列）
 - 终态四类：**同意、拒绝、超时、已取消**（用户显式取消或会话结束）
+- 超时时长是配置项 `permissions.timeout_sec`（默认 300 秒，<=0 回落默认）。**超时一律默认拒绝**：`state=timeout`，`by=timeout`，与显式拒绝不可区分语义（都是"未获许可"），审计里能区分来源
+- **ask_user 超时语义**：模型收到 `用户未回答（等待超时），请自行做出合理假设并在结果里写明`——与现有非交互一次性执行的非交互提示一致（不占 ask_user 配额），请求终态 `timeout` 留痕。
 
 ### 6.3 并发与"本会话允许"
 
@@ -325,7 +327,7 @@ type State string // pending | approved | denied | timeout | cancelled
 
 ### 6.5 里程碑拆分
 
-- **P2b-M13**：包结构 + 表 + 状态机 + 先到先得 + 超时默认拒绝 + decisions 事件 + 测试
+- **P2b-M13**：包结构 + 表 + 状态机 + 先到先得 + 超时默认拒绝 + decisions 事件 + 测试 —— **已实现**（`internal/perm`：`Service.Ask/Answer/Wait/Get/Pending/CancelSession`；事件 `{event:"permission", id, kind, state, by, source}` 无 payload；`permissions.timeout_sec` 默认 300s；ask_user 超时语义见上）
 - **P2b-M14**：ask_user / guard confirmer 迁移到权限服务（行为兼容）+ 测试
 - **P2b-M15**：session allow（按命令、列出、撤销）+ 社交入口只读限制 + 测试
 - **P2b-M16**：serve SSE 审批必达通道 + Last-Event-ID 补发接线（与 serve-api.md 同步）+ 测试

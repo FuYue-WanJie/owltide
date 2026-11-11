@@ -13,6 +13,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"sync"
 	"time"
@@ -58,8 +59,20 @@ type Job struct {
 	// ioDone closes when the output reader drains the pipe. Terminal
 	// state is only published after it drains, so a reader that sees a
 	// terminal job always sees the complete output tail.
-	ioDone    chan struct{}
+	ioDone chan struct{}
+	// finishing guards against concurrent terminal transitions;
+	// settled closes exactly when the terminal state is published, so
+	// a caller that loses the race waits for the state to actually
+	// appear instead of returning while State is still "running".
 	finishing bool
+	settled   chan struct{}
+}
+
+// state returns the current state under the job lock.
+func (j *Job) state() (string, int) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.State, j.ExitCode
 }
 
 // snapshot is a consistent view of a job's output tail.
@@ -115,8 +128,21 @@ const JobDrainTimeout = 2 * time.Second
 // concurrent callers (kill vs watchdog) return immediately.
 func (j *Job) finish(state string, code int) {
 	j.mu.Lock()
-	if j.State != JobRunning || j.finishing {
+	if j.State != JobRunning {
+		// Already terminal: settled is closed.
 		j.mu.Unlock()
+		return
+	}
+	if j.finishing {
+		// Another caller is mid-transition (draining the pipe, up to
+		// JobDrainTimeout). Wait for it to publish the terminal state
+		// instead of returning while State still reads "running".
+		done := j.settled
+		j.mu.Unlock()
+		select {
+		case <-done:
+		case <-time.After(JobDrainTimeout + time.Second):
+		}
 		return
 	}
 	j.finishing = true
@@ -138,6 +164,7 @@ func (j *Job) finish(state string, code int) {
 	j.ExitCode = code
 	j.Ended = time.Now()
 	j.finishing = false
+	close(j.settled)
 	j.mu.Unlock()
 }
 
@@ -189,7 +216,7 @@ func (m *JobManager) Start(bin, flag, command, dir string, timeout time.Duration
 	}
 	m.seq++
 	id := fmt.Sprintf("job-%d", m.seq)
-	j := &Job{ID: id, Command: command, State: JobRunning, Started: m.clock()}
+	j := &Job{ID: id, Command: command, State: JobRunning, Started: m.clock(), settled: make(chan struct{})}
 	m.jobs[id] = j
 	m.mu.Unlock()
 
@@ -197,18 +224,28 @@ func (m *JobManager) Start(bin, flag, command, dir string, timeout time.Duration
 	cmd.Dir = dir
 	// Platform setup: setpgid on Unix so the whole tree dies together;
 	// Windows needs no group (at least compiles and kills the main
-	// process). The pipe must exist before the goroutine reads it.
+	// process).
 	setJobProcessGroup(cmd)
-	pipe, err := cmd.StdoutPipe()
+	// Explicit os.Pipe, NOT cmd.StdoutPipe: Wait() closes a StdoutPipe's
+	// read end after the command exits, racing the reader goroutine —
+	// the reader can then see EOF with bytes still buffered (empty or
+	// truncated output). With our own pipe the parent closes only the
+	// write end, so EOF arrives naturally once the child (and any
+	// descendants holding it) exits, after every byte has been read.
+	pr, pw, err := os.Pipe()
 	if err != nil {
 		j.finish(JobFailed, -1)
 		return "", fmt.Errorf("job pipe: %w", err)
 	}
-	cmd.Stderr = cmd.Stdout // same pipe: combined stream
+	cmd.Stdout = pw
+	cmd.Stderr = pw // same pipe: combined stream
 	if err := cmd.Start(); err != nil {
+		pw.Close()
+		pr.Close()
 		j.finish(JobFailed, -1)
 		return "", fmt.Errorf("job start: %w", err)
 	}
+	pw.Close() // parent side; EOF when the process tree closes the write end
 	ioDone := make(chan struct{})
 	j.mu.Lock()
 	j.cmd = cmd
@@ -218,10 +255,10 @@ func (m *JobManager) Start(bin, flag, command, dir string, timeout time.Duration
 
 	go func() {
 		defer close(ioDone)
-		defer pipe.Close()
+		defer pr.Close()
 		buf := make([]byte, 32<<10)
 		for {
-			n, err := pipe.Read(buf)
+			n, err := pr.Read(buf)
 			if n > 0 {
 				j.appendOutput(buf[:n])
 			}
@@ -289,10 +326,11 @@ func (m *JobManager) Kill(id string) (map[string]any, error) {
 	if !ok {
 		return nil, fmt.Errorf("unknown job %q", id)
 	}
-	if j.State == JobRunning {
+	if st, _ := j.state(); st == JobRunning {
 		j.finish(JobKilled, -1)
 	}
-	return map[string]any{"id": id, "state": j.State, "killed": true}, nil
+	st, _ := j.state()
+	return map[string]any{"id": id, "state": st, "killed": true}, nil
 }
 
 // StopAll finishes every running job (session end / run abort). It
@@ -301,7 +339,7 @@ func (m *JobManager) StopAll() {
 	m.mu.Lock()
 	var targets []*Job
 	for _, j := range m.jobs {
-		if j.State == JobRunning {
+		if st, _ := j.state(); st == JobRunning {
 			targets = append(targets, j)
 		}
 	}

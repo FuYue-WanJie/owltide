@@ -313,3 +313,52 @@ func TestJobTempFilesCleaned(t *testing.T) {
 	}
 	_ = filepath.Join(dir, "unused")
 }
+
+// TestFinishSecondCallerWaits: when one caller is mid-transition
+// (draining the pipe), a concurrent finish must NOT return while State
+// still reads "running"; it waits for the terminal publish (and the
+// first caller's state wins).
+func TestFinishSecondCallerWaits(t *testing.T) {
+	j := &Job{State: JobRunning, settled: make(chan struct{})}
+	ioDone := make(chan struct{})
+	j.ioDone = ioDone
+
+	// First caller blocks on ioDone (simulated slow pipe drain).
+	firstDone := make(chan struct{})
+	go func() { j.finish(JobKilled, -1); close(firstDone) }()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		j.mu.Lock()
+		finishing := j.finishing
+		j.mu.Unlock()
+		if finishing {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// Second caller must block until the terminal state is published.
+	secondReturned := make(chan struct{})
+	go func() { j.finish(JobDone, 0); close(secondReturned) }()
+	select {
+	case <-secondReturned:
+		t.Fatal("second finish returned before terminal state was published")
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	// The first caller publishes: release the drain.
+	close(ioDone)
+	select {
+	case <-firstDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("first finish never returned")
+	}
+	select {
+	case <-secondReturned:
+	case <-time.After(3 * time.Second):
+		t.Fatal("second finish never returned after publish")
+	}
+	if st, _ := j.state(); st != JobKilled {
+		t.Fatalf("state = %s, want killed (first caller wins)", st)
+	}
+}

@@ -34,14 +34,26 @@
 | `hello` | serve 启动通知（M0） | 可丢 |
 | `message` | `{session}` — 新消息落盘（M0 预留，CLI 侧接线随 UI 里程碑） | 可丢 |
 | `state` | 子代理/作业状态变化（M0 预留） | 可丢 |
-| `approval_pending` | `{id, kind, source, payload}` — 权限服务待审批（第 6 节） | **必达** |
-| `approval_resolved` | `{id, state, by}` — 已由某端处理（先到先得，后到端收到此事件） | **必达** |
+| `approval_pending` | `{id, kind, source, payload}` — 权限服务待审批（第 6 节；payload 为问题/命令文本，仅本地可见） | **必达** |
+| `approval_resolved` | `{id, state, by}` — 已由某端处理（先到先得，所有已连接客户端都会收到终态与获胜端标识） | **必达** |
 | `reset` | `{}` — Last-Event-ID 超出补发窗口，要求客户端全量刷新 | 必达 |
 
-> `approval_*` 事件在接入权限服务（P2b-M16）后启用；M0 的 serve 只有只读事件。
+- `approval_pending` 事件在终态前对**新连上的客户端**幂等补发（每次连接按当前 pending 快照重发）；`approval_resolved` 在环形窗口内按 `Last-Event-ID` 补发
+- **必达**：审批类事件用背压发送（客户端缓冲满 5 秒判定为失联，断开其订阅），不进丢帧路径
+- M16 起，`chat`/`run` 以 `--api` 启动进程内实例（127.0.0.1 随机端口 + token）；独立 `owltide serve` 无活动权限表，回答接口返回 503
+
+## 审批回答接口（M16 最小设计，M13 验收时补定）
+
+| 方法 | 路径 | 认证 | 请求体 | 响应 |
+|------|------|------|--------|------|
+| POST | `/api/permissions/{id}/answer` | `X-Owltide-Token: <token>` 或 `Authorization: Bearer <token>` | `{"state":"approved"\|"denied","response":"可选，ask_user 的文本回答"}` | `{id, state, by:"serve", won}` |
+
+- 绑定：仅 127.0.0.1（chat/run 的进程内实例为随机端口，启动时打印一次 URL+token；token 不落日志/提交）
+- 先到先得：`won=false` 表示请求已被处理，响应携带终态与获胜端标识（perm 语义）
+- 状态机：仅接受 `approved`/`denied`（ask_user 的 `response` 以 approved 记录）；400=非法状态，401=token 错，403=只读端点（channel），404=未知/已过期 id，503=无活动权限会话
 
 ## 已知边界（M0）
 
 - 独立 `serve` 进程只展示持久化的会话；活代理的 subagent/job 快照需在 chat/run 进程内接 `State.SetWiring`（随 UI 里程碑做进程内嵌 serve 或事件桥）
-- 写接口（发消息、审批回答）在权限服务（P2b 第 6 节）完成后才加，且必须走权限服务，不另起审批通道
+- 写接口：审批回答已实现（见上，走权限服务，未另起通道）；发消息等其他写接口仍未提供
 - `seq` 当前是进程内序号：serve 重启后从 1 重来，客户端以 `hello` 事件为界重置本地游标

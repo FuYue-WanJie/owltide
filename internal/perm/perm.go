@@ -148,6 +148,9 @@ type Options struct {
 	// RetainFor drops terminal requests older than this; <=0 means
 	// DefaultRetainFor.
 	RetainFor time.Duration
+	// OnPending is called after a request is registered (serve pushes
+	// it to SSE clients). Called without the service lock held.
+	OnPending func(Request)
 }
 
 type entry struct {
@@ -166,6 +169,7 @@ type Service struct {
 	retain    int
 	retainFor time.Duration
 	events    EventFunc
+	onPending func(Request)
 	now       func() time.Time
 	// expired tombstones recently reaped ids so Get can say "expired"
 	// instead of "unknown". Bounded (expiredMax) to stay small.
@@ -203,6 +207,7 @@ func New(opt Options) *Service {
 		retain:    retain,
 		retainFor: retainFor,
 		events:    opt.Events,
+		onPending: opt.OnPending,
 		now:       now,
 		expired:   map[string]bool{},
 		allows:    map[string]bool{},
@@ -246,6 +251,9 @@ func (s *Service) Ask(kind Kind, src Source, payload any) (Request, error) {
 	})
 	s.reqs[id] = e
 	s.mu.Unlock()
+	if s.onPending != nil {
+		s.onPending(r)
+	}
 	return r, nil
 }
 
@@ -329,6 +337,16 @@ func (s *Service) emitBlocked(reason string, fields map[string]any) {
 		out[k] = v
 	}
 	s.events("permission_blocked", out)
+}
+
+// RespondAs is the ask_user counterpart of AnswerAs: approve with the
+// textual answer. The channel endpoint is refused like AnswerAs.
+func (s *Service) RespondAs(id, response, by, endpoint string) (Outcome, error) {
+	if endpoint == EndpointChannel {
+		s.emitBlocked("channel_answer", map[string]any{"id": id, "by": by, "kind": "respond"})
+		return Outcome{}, ErrChannelReadOnly
+	}
+	return s.Respond(id, response, by)
 }
 
 // AnswerAs resolves a request on behalf of a named endpoint. The

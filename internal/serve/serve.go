@@ -8,16 +8,21 @@ package serve
 // contents are never loaded into the handler's reach.
 
 import (
+	"crypto/subtle"
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/FuYue-WanJie/owltide/internal/perm"
 )
 
 //go:embed index.html
@@ -150,7 +155,13 @@ func (st *State) SetAllows(fn func() []string) {
 type Server struct {
 	Sessions Sessions
 	State    *State
-	hub      *hub
+	// Perm is the live permission table (nil in a standalone serve:
+	// approval endpoints then answer 503 and SSE has no approval
+	// events).
+	Perm PermSource
+	// Token authenticates the answer endpoint (empty disables it).
+	Token string
+	hub   *hub
 }
 
 // New builds a server.
@@ -167,6 +178,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/subagents", s.handleSubs)
 	mux.HandleFunc("GET /api/jobs", s.handleJobs)
 	mux.HandleFunc("GET /api/perm/allows", s.handleAllows)
+	mux.HandleFunc("POST /api/permissions/{id}/answer", s.handlePermAnswer)
 	mux.HandleFunc("GET /api/events", s.handleEvents)
 	return mux
 }
@@ -229,17 +241,36 @@ func (s *Server) handleJobs(w http.ResponseWriter, _ *http.Request) {
 
 // ---- SSE ----
 
-type hub struct {
-	mu      sync.Mutex
-	clients map[chan []byte]struct{}
+// frame is one SSE event with its sequence number.
+type frame struct {
+	seq  int
+	data []byte // full wire bytes: "id: <seq>\ndata: {...}\n\n"
 }
 
-func newHub() *hub { return &hub{clients: map[chan []byte]struct{}{}} }
+const (
+	sseRingSize  = 1024 // replay window
+	sseSendBound = 5 * time.Second
+)
+
+// hub fans out SSE events with monotonic sequence numbers and a replay
+// ring. Approval-class events are must-deliver: they are sent with
+// backpressure (a client that stops draining for sseSendBound is
+// dropped instead of hanging the publisher); progress-class events are
+// lossy (non-blocking, drop-oldest is per-frame: newest wins on the
+// channel).
+type hub struct {
+	mu      sync.Mutex
+	seq     int
+	ring    []frame
+	clients map[chan []byte]bool
+}
+
+func newHub() *hub { return &hub{clients: map[chan []byte]bool{}} }
 
 func (h *hub) subscribe() chan []byte {
-	ch := make(chan []byte, 16)
+	ch := make(chan []byte, 32)
 	h.mu.Lock()
-	h.clients[ch] = struct{}{}
+	h.clients[ch] = true
 	h.mu.Unlock()
 	return ch
 }
@@ -250,35 +281,193 @@ func (h *hub) unsubscribe(ch chan []byte) {
 	h.mu.Unlock()
 }
 
-func (h *hub) broadcast(event string, data any) {
-	payload, err := json.Marshal(map[string]any{"event": event, "data": data})
+func (h *hub) drop(ch chan []byte) {
+	h.unsubscribe(ch)
+	close(ch)
+}
+
+// publish stores the event in the replay ring and delivers it.
+func (h *hub) publish(event string, data any, mustDeliver bool) {
+	h.mu.Lock()
+	h.seq++
+	n := h.seq
+	payload, err := json.Marshal(map[string]any{"seq": n, "event": event, "data": data})
 	if err != nil {
+		h.mu.Unlock()
 		return
 	}
-	frame := append([]byte("data: "), append(payload, '\n', '\n')...)
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	f := frame{n, []byte(fmt.Sprintf("id: %d\ndata: %s\n\n", n, payload))}
+	h.ring = append(h.ring, f)
+	if len(h.ring) > sseRingSize {
+		h.ring = h.ring[len(h.ring)-sseRingSize:]
+	}
+	clients := make([]chan []byte, 0, len(h.clients))
 	for ch := range h.clients {
+		clients = append(clients, ch)
+	}
+	h.mu.Unlock()
+
+	for _, ch := range clients {
+		if mustDeliver {
+			select {
+			case ch <- f.data:
+			case <-time.After(sseSendBound):
+				// Stalled client: drop the subscription rather than
+				// hanging the publisher forever.
+				h.drop(ch)
+			}
+			continue
+		}
 		select {
-		case ch <- frame:
-		default: // slow client: drop the frame, keep the stream alive
+		case ch <- f.data:
+		default: // slow progress client: drop the frame
 		}
 	}
 }
 
-// Publish lets the CLI push runtime events (new messages, state
-// changes) into the SSE stream.
-func (s *Server) Publish(event string, data any) { s.hub.broadcast(event, data) }
+// replay returns the frames after lastID; ok=false with reset=true
+// means the client is behind the ring window and must refetch.
+func (h *hub) replay(last int) (frames []frame, reset bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if last < 0 || len(h.ring) == 0 {
+		return nil, false
+	}
+	if last+1 < h.ring[0].seq {
+		return nil, true
+	}
+	for _, f := range h.ring {
+		if f.seq > last {
+			frames = append(frames, f)
+		}
+	}
+	return frames, false
+}
+
+// snapshotFrame allocates a sequence number for a one-off frame that
+// is NOT stored in the ring (e.g. the pending-approvals snapshot a new
+// client receives on connect).
+func (h *hub) snapshotFrame(event string, data any) frame {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.seq++
+	n := h.seq
+	payload, err := json.Marshal(map[string]any{"seq": n, "event": event, "data": data})
+	if err != nil {
+		return frame{}
+	}
+	return frame{n, []byte(fmt.Sprintf("id: %d\ndata: %s\n\n", n, payload))}
+}
+
+// Publish pushes a lossy progress event into the SSE stream.
+func (s *Server) Publish(event string, data any) { s.hub.publish(event, data, false) }
+
+// PublishMust pushes a must-deliver event (approval class): all
+// connected clients receive it; stalled clients are dropped rather
+// than hanging the publisher.
+func (s *Server) PublishMust(event string, data any) { s.hub.publish(event, data, true) }
+
+// ---- permission wiring (P2b-M16) ----
+
+// PermSource is the slice of the permission service the serve API
+// needs. *perm.Service implements it.
+type PermSource interface {
+	Pending() []perm.Request
+	AnswerAs(id string, state perm.State, by, endpoint string) (perm.Outcome, error)
+	RespondAs(id, response, by, endpoint string) (perm.Outcome, error)
+	Allows() []string
+}
+
+// pendingApprovals returns the current pending requests (nil without a
+// live permission session).
+func (s *Server) pendingApprovals() []perm.Request {
+	if s.Perm == nil {
+		return nil
+	}
+	return s.Perm.Pending()
+}
 
 func (s *Server) handleAllows(w http.ResponseWriter, _ *http.Request) {
-	s.State.mu.Lock()
-	fn := s.State.allows
-	s.State.mu.Unlock()
-	list := make([]string, 0)
-	if fn != nil {
-		list = fn()
+	var list []string
+	if s.Perm != nil {
+		list = s.Perm.Allows()
+	} else {
+		s.State.mu.Lock()
+		fn := s.State.allows
+		s.State.mu.Unlock()
+		if fn != nil {
+			list = fn()
+		}
+	}
+	if list == nil {
+		list = []string{}
 	}
 	writeJSON(w, map[string]any{"allows": list})
+}
+
+// handlePermAnswer implements POST /api/permissions/{id}/answer (see
+// serve-api.md): local token required, first come first served via the
+// permission service.
+func (s *Server) handlePermAnswer(w http.ResponseWriter, r *http.Request) {
+	if s.Perm == nil {
+		http.Error(w, "no live permission session", http.StatusServiceUnavailable)
+		return
+	}
+	if s.Token == "" || !s.tokenOK(r) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	id := r.PathValue("id")
+	var body struct {
+		State    string `json:"state"`
+		Response string `json:"response"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	state := perm.State(body.State)
+	if state != perm.StateApproved && state != perm.StateDenied {
+		http.Error(w, "state must be approved or denied", http.StatusBadRequest)
+		return
+	}
+	var (
+		out perm.Outcome
+		err error
+	)
+	if body.Response != "" {
+		out, err = s.Perm.RespondAs(id, body.Response, "serve", "serve")
+	} else {
+		out, err = s.Perm.AnswerAs(id, state, "serve", "serve")
+	}
+	if err != nil {
+		if errors.Is(err, perm.ErrChannelReadOnly) {
+			http.Error(w, err.Error(), http.StatusForbidden)
+			return
+		}
+		if errors.Is(err, perm.ErrUnknown) || errors.Is(err, perm.ErrExpired) {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{
+		"id": id, "state": out.Request.State, "by": out.Request.By, "won": out.Won,
+	})
+}
+
+// tokenOK checks the local token (Authorization: Bearer or
+// X-Owltide-Token).
+func (s *Server) tokenOK(r *http.Request) bool {
+	if h := r.Header.Get("X-Owltide-Token"); h != "" && subtle.ConstantTimeCompare([]byte(h), []byte(s.Token)) == 1 {
+		return true
+	}
+	auth := r.Header.Get("Authorization")
+	if strings.HasPrefix(auth, "Bearer ") {
+		return subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(auth, "Bearer ")), []byte(s.Token)) == 1
+	}
+	return false
 }
 
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
@@ -291,6 +480,36 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	ch := s.hub.subscribe()
 	defer s.hub.unsubscribe(ch)
+
+	// Replay after Last-Event-ID, or a reset when behind the window.
+	last := -1
+	if v := r.Header.Get("Last-Event-ID"); v != "" {
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+			last = n
+		}
+	}
+	frames, reset := s.hub.replay(last)
+	for _, f := range frames {
+		if _, err := w.Write(f.data); err != nil {
+			return
+		}
+	}
+	if reset {
+		if _, err := w.Write([]byte(s.hub.snapshotFrame("reset", map[string]any{}).data)); err != nil {
+			return
+		}
+	}
+	// Pending approvals must reach every new client until they reach a
+	// terminal state (idempotent per request id).
+	for _, req := range s.pendingApprovals() {
+		if _, err := w.Write(s.hub.snapshotFrame("approval_pending", map[string]any{
+			"id": req.ID, "kind": req.Kind, "source": req.Source.Agent, "payload": req.Payload,
+		}).data); err != nil {
+			return
+		}
+	}
+	fl.Flush()
+
 	// Heartbeat comments keep intermediaries from closing the stream.
 	heartbeat := time.NewTicker(15 * time.Second)
 	defer heartbeat.Stop()
@@ -298,8 +517,13 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-r.Context().Done():
 			return
-		case frame := <-ch:
-			_, _ = w.Write(frame)
+		case f, ok := <-ch:
+			if !ok {
+				return // stalled client dropped by the hub
+			}
+			if _, err := w.Write(f); err != nil {
+				return
+			}
 			fl.Flush()
 		case <-heartbeat.C:
 			_, _ = w.Write([]byte(": ping\n\n"))

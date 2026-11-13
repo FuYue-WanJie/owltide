@@ -27,6 +27,18 @@ import (
 // Confirmer asks the user a yes/no question.
 type Confirmer func(prompt string) bool
 
+// DetailConfirmer is the structured confirmation callback: kind and
+// detail (command text or path) travel with the prompt so the caller
+// can apply session-allow policy per exact command. When set it takes
+// precedence over Confirmer.
+type DetailConfirmer func(prompt, kind, detail string) bool
+
+// detailConfirmerHolder is implemented by tools that can carry the
+// structured confirmation callback.
+type detailConfirmerHolder interface {
+	setDetailConfirmer(DetailConfirmer)
+}
+
 // confirmerHolder is implemented by tools that can ask the user.
 type confirmerHolder interface {
 	setConfirmer(Confirmer)
@@ -564,8 +576,14 @@ func isLocksFile(path string) bool {
 
 // confirmDanger routes a dangerous action through the confirmer.
 // The returned error text is stable so logs are greppable.
-func confirmDanger(c Confirmer, kind, detail string) error {
+func confirmDanger(c Confirmer, dc DetailConfirmer, kind, detail string) error {
 	prompt := fmt.Sprintf("DANGEROUS %s: %s — allow?", kind, detail)
+	if dc != nil {
+		if !dc(prompt, kind, detail) {
+			return fmt.Errorf("%s rejected by user", prompt)
+		}
+		return nil
+	}
 	if c == nil {
 		return fmt.Errorf("%s requires user confirmation (no interactive session); rejected", prompt)
 	}

@@ -215,3 +215,36 @@ func TestNoSecretMaterial(t *testing.T) {
 		t.Fatal("snapshot leaks key material")
 	}
 }
+
+// TestPermAllowsEndpoint: the session allowlist is queryable through
+// the read-only API (P2b-M15).
+func TestPermAllowsEndpoint(t *testing.T) {
+	ts, sv := newTestServer(t)
+	resp, err := http.Get(ts.URL + "/api/perm/allows")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var empty struct {
+		Allows []string `json:"allows"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&empty); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if empty.Allows == nil || len(empty.Allows) != 0 {
+		t.Fatalf("empty allows = %v, want []", empty.Allows)
+	}
+
+	sv.State.SetAllows(func() []string { return []string{"cp\x00a\x00b"} })
+	resp, _ = http.Get(ts.URL + "/api/perm/allows")
+	var got struct {
+		Allows []string `json:"allows"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if len(got.Allows) != 1 || got.Allows[0] != "cp\x00a\x00b" {
+		t.Fatalf("allows = %v", got.Allows)
+	}
+}

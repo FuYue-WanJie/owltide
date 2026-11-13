@@ -20,9 +20,13 @@ type eventRecorder struct {
 }
 
 func (r *eventRecorder) sink(event string, fields map[string]any) {
+	rec := map[string]any{"event": event}
+	for k, v := range fields {
+		rec[k] = v
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.events = append(r.events, fields)
+	r.events = append(r.events, rec)
 }
 
 func (r *eventRecorder) all() []map[string]any {
@@ -346,5 +350,74 @@ func TestPendingNeverReaped(t *testing.T) {
 	}
 	if _, err := svc.Get(pending.ID); err != nil {
 		t.Fatalf("pending request was reaped: %v", err)
+	}
+}
+
+// TestSessionAllow: exact signatures are allowlisted, risk-set entries
+// are refused, revoke/replace work, and session end clears everything.
+func TestSessionAllow(t *testing.T) {
+	svc := New(Options{})
+	if err := svc.Allow("rm\x00-rf\x00x", true); !errors.Is(err, ErrRisky) {
+		t.Fatalf("risky allow = %v, want ErrRisky", err)
+	}
+	if err := svc.Allow("cp\x00a.txt\x00b.txt", false); err != nil {
+		t.Fatal(err)
+	}
+	if !svc.CommandAllowed("cp\x00a.txt\x00b.txt") {
+		t.Fatal("allowed signature must match exactly")
+	}
+	if svc.CommandAllowed("cp\x00a.txt\x00c.txt") {
+		t.Fatal("different argv must not match")
+	}
+	if got := svc.Allows(); len(got) != 1 || got[0] != "cp\x00a.txt\x00b.txt" {
+		t.Fatalf("allows = %v", got)
+	}
+	if !svc.Revoke("cp\x00a.txt\x00b.txt") || len(svc.Allows()) != 0 {
+		t.Fatal("revoke failed")
+	}
+
+	// Session end invalidates every allow.
+	if err := svc.Allow("cp\x00a\x00b", false); err != nil {
+		t.Fatal(err)
+	}
+	svc.CancelSession("s1")
+	if len(svc.Allows()) != 0 {
+		t.Fatal("session end must clear allows")
+	}
+}
+
+// TestChannelReadOnly: social-channel requests cannot create write
+// classes, cannot answer approvals, and both attempts are audited.
+func TestChannelReadOnly(t *testing.T) {
+	rec := &eventRecorder{}
+	svc := New(Options{Events: rec.sink})
+	src := Source{Agent: "main", Channel: "qq", Session: "s1"}
+
+	if _, err := svc.Ask(KindApproval, src, nil); !errors.Is(err, ErrChannelReadOnly) {
+		t.Fatalf("channel approval ask = %v, want ErrChannelReadOnly", err)
+	}
+	// ask_user is the one allowed class (read-only Q&A).
+	if _, err := svc.Ask(KindAskUser, src, "question?"); err != nil {
+		t.Fatalf("channel ask_user must be allowed: %v", err)
+	}
+
+	local, _ := svc.Ask(KindApproval, testSource("s1"), nil)
+	if _, err := svc.AnswerAs(local.ID, StateApproved, "qq-user", EndpointChannel); !errors.Is(err, ErrChannelReadOnly) {
+		t.Fatalf("channel answer = %v, want ErrChannelReadOnly", err)
+	}
+	out, _ := svc.Get(local.ID)
+	if out.Request.State != StatePending {
+		t.Fatalf("channel answer must not resolve the request, state = %s", out.Request.State)
+	}
+
+	evs := rec.all()
+	blocked := 0
+	for _, e := range evs {
+		if e["event"] == "permission_blocked" {
+			blocked++
+		}
+	}
+	if blocked != 2 {
+		t.Fatalf("blocked events = %d, want 2: %v", blocked, evs)
 	}
 }

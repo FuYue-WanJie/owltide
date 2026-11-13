@@ -118,16 +118,23 @@ type writeFileArgs struct {
 	Content string `json:"content"`
 }
 
-type WriteFile struct{ confirmer Confirmer }
+type WriteFile struct {
+	confirmer       Confirmer
+	detailConfirmer DetailConfirmer
+}
 
 // setConfirmer implements confirmerHolder (pointer receiver so the
 // registry mutation is visible to Call).
 func (w *WriteFile) setConfirmer(c Confirmer) { w.confirmer = c }
 
+// setDetailConfirmer implements detailConfirmerHolder.
+func (w *WriteFile) setDetailConfirmer(c DetailConfirmer) { w.detailConfirmer = c }
+
 // CloneWithConfirmer returns a copy with its own confirmer.
 func (w *WriteFile) CloneWithConfirmer(c Confirmer) Tool {
 	w2 := *w
 	w2.confirmer = c
+	w2.detailConfirmer = nil // per-session clones use their own prompt path
 	return &w2
 }
 
@@ -153,7 +160,7 @@ func (w *WriteFile) Call(_ context.Context, args json.RawMessage) (string, error
 		return "", err
 	}
 	if isLocksFile(a.Path) {
-		if err := confirmDanger(w.confirmer, "lock-file write", a.Path); err != nil {
+		if err := confirmDanger(w.confirmer, w.detailConfirmer, "lock-file write", a.Path); err != nil {
 			return "", err
 		}
 	}
@@ -175,15 +182,22 @@ type editFileArgs struct {
 	Expect string `json:"expect_sha256"`
 }
 
-type EditFile struct{ confirmer Confirmer }
+type EditFile struct {
+	confirmer       Confirmer
+	detailConfirmer DetailConfirmer
+}
 
 // setConfirmer implements confirmerHolder.
 func (e *EditFile) setConfirmer(c Confirmer) { e.confirmer = c }
+
+// setDetailConfirmer implements detailConfirmerHolder.
+func (e *EditFile) setDetailConfirmer(c DetailConfirmer) { e.detailConfirmer = c }
 
 // CloneWithConfirmer returns a copy with its own confirmer.
 func (e *EditFile) CloneWithConfirmer(c Confirmer) Tool {
 	e2 := *e
 	e2.confirmer = c
+	e2.detailConfirmer = nil
 	return &e2
 }
 
@@ -215,7 +229,7 @@ func (e *EditFile) Call(_ context.Context, args json.RawMessage) (string, error)
 		return "", fmt.Errorf("expect_sha256 is required; read_file the path first and pass its [sha256:...] marker")
 	}
 	if isLocksFile(a.Path) {
-		if err := confirmDanger(e.confirmer, "lock-file write", a.Path); err != nil {
+		if err := confirmDanger(e.confirmer, e.detailConfirmer, "lock-file write", a.Path); err != nil {
 			return "", err
 		}
 	}

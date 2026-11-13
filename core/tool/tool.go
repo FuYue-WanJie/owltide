@@ -144,6 +144,16 @@ func (r *Registry) SetConfirmer(c Confirmer) {
 	}
 }
 
+// SetDetailConfirmer wires the structured (kind/detail) confirmation
+// callback; tools that support it prefer it over the plain Confirmer.
+func (r *Registry) SetDetailConfirmer(c DetailConfirmer) {
+	for _, t := range r.tools {
+		if h, ok := t.(detailConfirmerHolder); ok {
+			h.setDetailConfirmer(c)
+		}
+	}
+}
+
 // CloneWithConfirmer returns a copy of the registry in which every
 // tool that can carry a confirmer gets its own clone wired to c.
 // Shared tool instances in the source registry are untouched, so the

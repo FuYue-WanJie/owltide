@@ -65,10 +65,18 @@ func (s State) Terminal() bool {
 
 // Source identifies where a request came from.
 type Source struct {
-	Agent   string `json:"agent"`   // "main" or a sub-agent id
-	Role    string `json:"role"`    // role name (may be empty)
-	Session string `json:"session"` // session id
+	Agent   string `json:"agent"`             // "main" or a sub-agent id
+	Role    string `json:"role"`              // role name (may be empty)
+	Session string `json:"session"`           // session id
+	Channel string `json:"channel,omitempty"` // social origin; empty = local
 }
+
+// Endpoint names for answers (audit "by" stays free-form).
+const (
+	EndpointCLI     = "cli"
+	EndpointServe   = "serve"
+	EndpointChannel = "channel"
+)
 
 // Request is one pending/answered item. Payload is type-specific
 // (command argv, question text, plan id, memory body) and is never
@@ -117,6 +125,11 @@ var (
 	// ErrExpired is returned for a request that reached a terminal
 	// state and was removed by the retention policy.
 	ErrExpired = errors.New("permission: request expired")
+	// ErrRisky is returned when a session allow targets a command in
+	// the non-overridable risk set.
+	ErrRisky = errors.New("permission: command is in the non-overridable risk set")
+	// ErrChannelReadOnly is returned for social-channel write attempts.
+	ErrChannelReadOnly = errors.New("permission: social channel is read-only")
 )
 
 // Options configures a Service.
@@ -158,6 +171,9 @@ type Service struct {
 	// instead of "unknown". Bounded (expiredMax) to stay small.
 	expired   map[string]bool
 	expiredAt []string
+	// allows are the session-scoped, exact-argv command approvals
+	// ("本会话允许"). In-memory only; cleared on session end.
+	allows map[string]bool
 }
 
 // expiredMax caps the tombstone ring.
@@ -189,6 +205,7 @@ func New(opt Options) *Service {
 		events:    opt.Events,
 		now:       now,
 		expired:   map[string]bool{},
+		allows:    map[string]bool{},
 	}
 }
 
@@ -199,6 +216,14 @@ func (s *Service) Timeout() time.Duration { return s.timeout }
 func (s *Service) Ask(kind Kind, src Source, payload any) (Request, error) {
 	if kind == "" {
 		return Request{}, fmt.Errorf("permission: kind is required")
+	}
+	if src.Channel != "" && kind != KindAskUser {
+		// Social entry is read-only: it may ask/answer plain questions
+		// but never trigger a write-class approval path.
+		s.emitBlocked("channel_write_request", map[string]any{
+			"kind": string(kind), "source": src.Agent, "channel": src.Channel,
+		})
+		return Request{}, fmt.Errorf("%w: %s", ErrChannelReadOnly, kind)
 	}
 	if src.Agent == "" {
 		src.Agent = "main"
@@ -291,6 +316,84 @@ func (s *Service) resolveWith(id string, state State, by, response string) (Outc
 		s.events("permission", fields)
 	}
 	return out, nil
+}
+
+// emitBlocked records a refused social-channel attempt as a decisions
+// event (reason/id/kind/source only, no payload).
+func (s *Service) emitBlocked(reason string, fields map[string]any) {
+	if s.events == nil {
+		return
+	}
+	out := map[string]any{"reason": reason}
+	for k, v := range fields {
+		out[k] = v
+	}
+	s.events("permission_blocked", out)
+}
+
+// AnswerAs resolves a request on behalf of a named endpoint. The
+// social-channel endpoint is read-only: it cannot answer approvals (or
+// any other request), and the attempt is audited.
+func (s *Service) AnswerAs(id string, state State, by, endpoint string) (Outcome, error) {
+	if endpoint == EndpointChannel {
+		s.emitBlocked("channel_answer", map[string]any{"id": id, "by": by, "kind": "answer"})
+		return Outcome{}, ErrChannelReadOnly
+	}
+	return s.Answer(id, state, by)
+}
+
+// ---- session allows ("本会话允许") ----
+
+// Allow records a session-scoped approval for one exact command
+// signature (tool.CommandSignature). Risk-set commands are refused:
+// they always require individual confirmation. Memory only; cleared on
+// session end.
+func (s *Service) Allow(sig string, risky bool) error {
+	if sig == "" {
+		return fmt.Errorf("permission: empty command signature")
+	}
+	if risky {
+		return ErrRisky
+	}
+	s.mu.Lock()
+	s.allows[sig] = true
+	s.mu.Unlock()
+	return nil
+}
+
+// CommandAllowed reports whether the exact signature is allowlisted.
+func (s *Service) CommandAllowed(sig string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.allows[sig]
+}
+
+// Allows lists the session-approved signatures (sorted, stable).
+func (s *Service) Allows() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, 0, len(s.allows))
+	for sig := range s.allows {
+		out = append(out, sig)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// Revoke removes one signature from the allowlist.
+func (s *Service) Revoke(sig string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.allows[sig]
+	delete(s.allows, sig)
+	return ok
+}
+
+// RevokeAll clears the allowlist (session end).
+func (s *Service) RevokeAll() {
+	s.mu.Lock()
+	s.allows = map[string]bool{}
+	s.mu.Unlock()
 }
 
 // Wait blocks until the request reaches a terminal state or ctx ends.
@@ -428,4 +531,6 @@ func (s *Service) CancelSession(session string) {
 	for _, id := range ids {
 		_, _ = s.resolve(id, StateCancelled, "session_end")
 	}
+	// Session end invalidates every session allow.
+	s.RevokeAll()
 }

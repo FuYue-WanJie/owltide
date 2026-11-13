@@ -124,9 +124,10 @@ func validID(id string) bool {
 // CLI wires it to narrow adapters so serve never imports subagent (no
 // key/endpoint reach).
 type State struct {
-	mu   sync.Mutex
-	subs func() []map[string]any
-	jobs func() []map[string]any
+	mu     sync.Mutex
+	subs   func() []map[string]any
+	jobs   func() []map[string]any
+	allows func() []string
 }
 
 // SetWiring installs the snapshot functions (called once at startup).
@@ -134,6 +135,13 @@ func (st *State) SetWiring(subs, jobs func() []map[string]any) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	st.subs, st.jobs = subs, jobs
+}
+
+// SetAllows installs the session-allow provider (P2b-M15).
+func (st *State) SetAllows(fn func() []string) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.allows = fn
 }
 
 // ---- HTTP handlers ----
@@ -158,6 +166,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/sessions/{id}", s.handleSession)
 	mux.HandleFunc("GET /api/subagents", s.handleSubs)
 	mux.HandleFunc("GET /api/jobs", s.handleJobs)
+	mux.HandleFunc("GET /api/perm/allows", s.handleAllows)
 	mux.HandleFunc("GET /api/events", s.handleEvents)
 	return mux
 }
@@ -260,6 +269,17 @@ func (h *hub) broadcast(event string, data any) {
 // Publish lets the CLI push runtime events (new messages, state
 // changes) into the SSE stream.
 func (s *Server) Publish(event string, data any) { s.hub.broadcast(event, data) }
+
+func (s *Server) handleAllows(w http.ResponseWriter, _ *http.Request) {
+	s.State.mu.Lock()
+	fn := s.State.allows
+	s.State.mu.Unlock()
+	list := make([]string, 0)
+	if fn != nil {
+		list = fn()
+	}
+	writeJSON(w, map[string]any{"allows": list})
+}
 
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	fl, ok := w.(http.Flusher)

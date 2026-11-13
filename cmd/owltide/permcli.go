@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/FuYue-WanJie/owltide/core/agent"
+	"github.com/FuYue-WanJie/owltide/core/tool"
 	"github.com/FuYue-WanJie/owltide/internal/perm"
 )
 
@@ -104,6 +105,20 @@ func askViaPerm(svc *perm.Service, sessionID string,
 			return "", fmt.Errorf("ask_user: %w", aerr)
 		}
 		return "", fmt.Errorf("ask_user: no answer provided")
+	}
+}
+
+// confirmDetail is the structured (kind/detail) confirmation callback:
+// non-risk commands pre-approved by a session allow pass without
+// prompting; risk-set commands and everything else go through the
+// permission service (timeout = deny).
+func confirmDetail(svc *perm.Service, sessionID string, promptFn func(string) bool) func(prompt, kind, detail string) bool {
+	return func(prompt, kind, detail string) bool {
+		if kind == "command" && !tool.IsRiskCommand(detail) &&
+			svc.CommandAllowed(tool.CommandSignature(detail)) {
+			return true
+		}
+		return confirmViaPerm(svc, perm.Source{Agent: "main", Session: sessionID}, promptFn, prompt)
 	}
 }
 

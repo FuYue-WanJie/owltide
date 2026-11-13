@@ -12,6 +12,7 @@
 | GET | `/api/sessions/{id}` | 某会话的消息（messages.jsonl 逐行 JSON；坏行跳过） | `[message...]` |
 | GET | `/api/subagents` | 子代理状态快照 | `[{id, role, state, task, delivered}]` |
 | GET | `/api/jobs` | 后台作业状态快照 | `[{id, state, exit_code, command, started, dropped}]` |
+| GET | `/api/perm/allows` | 本会话允许列表（按命令签名） | `{allows: [signature...]}` |
 | GET | `/api/events` | SSE 事件流（`id: <seq>` + `data: {"seq":...,"event":...,"data":...}`；15s 心跳 `: ping`；支持 `Last-Event-ID` 补发） | text/event-stream |
 
 ## 约定与边界

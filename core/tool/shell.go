@@ -38,7 +38,8 @@ type Shell struct {
 	// Jobs manages background=true runs; nil disables background.
 	Jobs *JobManager
 
-	confirmer Confirmer
+	confirmer       Confirmer
+	detailConfirmer DetailConfirmer
 }
 
 // NewShell builds a Shell from platform defaults.
@@ -56,10 +57,14 @@ func (s *Shell) SetConfirmer(c Confirmer) { s.confirmer = c }
 // setConfirmer implements confirmerHolder.
 func (s *Shell) setConfirmer(c Confirmer) { s.SetConfirmer(c) }
 
+// setDetailConfirmer implements detailConfirmerHolder.
+func (s *Shell) setDetailConfirmer(c DetailConfirmer) { s.detailConfirmer = c }
+
 // CloneWithConfirmer returns a copy of s with its own confirmer.
 func (s *Shell) CloneWithConfirmer(c Confirmer) Tool {
 	s2 := *s
 	s2.confirmer = c
+	s2.detailConfirmer = nil
 	return &s2
 }
 
@@ -92,7 +97,7 @@ func (s Shell) Call(ctx context.Context, args json.RawMessage) (string, error) {
 			return "", fmt.Errorf("background execution is not enabled in this session")
 		}
 		if isDangerousCommand(a.Command) {
-			if err := confirmDanger(s.confirmer, "command", a.Command); err != nil {
+			if err := confirmDanger(s.confirmer, s.detailConfirmer, "command", a.Command); err != nil {
 				return "", err
 			}
 		}
@@ -117,7 +122,7 @@ func (s Shell) Call(ctx context.Context, args json.RawMessage) (string, error) {
 		return string(b), nil
 	}
 	if isDangerousCommand(a.Command) {
-		if err := confirmDanger(s.confirmer, "command", a.Command); err != nil {
+		if err := confirmDanger(s.confirmer, s.detailConfirmer, "command", a.Command); err != nil {
 			return "", err
 		}
 	}

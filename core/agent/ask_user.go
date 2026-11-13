@@ -24,6 +24,11 @@ import (
 // data, not a new instruction (distinct from the sub-agent marker).
 const UserAnswerMark = "[以下为用户回答]"
 
+// AskTimeoutMessage is what the model receives when the user does not
+// answer in time (permission-service timeout): the run proceeds on the
+// model's own stated assumptions (P2b-M14, p2b.md §6.5).
+const AskTimeoutMessage = "用户未回答（等待超时），请自行做出合理假设并在结果里写明"
+
 // Asker prompts the human and returns the answer. In interactive mode
 // this reads the terminal; nil means non-interactive.
 type Asker func(question string, choices []string) (string, error)
@@ -91,6 +96,11 @@ func (t *AskUserTool) Call(_ context.Context, args json.RawMessage) (string, err
 	ans, err := t.Asker(a.Question, a.Choices)
 	if err != nil {
 		return "", fmt.Errorf("ask_user: %w", err)
+	}
+	if ans == AskTimeoutMessage {
+		// Timeout: the documented semantic, verbatim — no answer mark,
+		// this is not user data.
+		return AskTimeoutMessage, nil
 	}
 	out := UserAnswerMark + " 问：" + a.Question
 	if len(a.Choices) > 0 {

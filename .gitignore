@@ -1,4 +1,4 @@
 logs/
 spill/
 *.jsonl
-owltide
+/owltide

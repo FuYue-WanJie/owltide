@@ -82,6 +82,9 @@ type Request struct {
 	State    State     `json:"state"`
 	Answered time.Time `json:"answered,omitempty"`
 	By       string    `json:"by,omitempty"` // answering client; "timeout" / "session_end" for automatic terminals
+	// Response is the textual answer for ask_user requests (set by
+	// Respond; empty for yes/no approvals).
+	Response string `json:"response,omitempty"`
 }
 
 // Outcome is what an answerer or waiter observes.
@@ -234,11 +237,25 @@ func (s *Service) Answer(id string, state State, by string) (Outcome, error) {
 	return s.resolve(id, state, by)
 }
 
+// Respond approves an ask_user request with its textual answer. It is
+// the ask_user counterpart of Answer: first caller wins, later callers
+// observe the existing terminal state (and its response).
+func (s *Service) Respond(id string, response string, by string) (Outcome, error) {
+	if by == "" {
+		by = "unknown"
+	}
+	return s.resolveWith(id, StateApproved, by, response)
+}
+
 // resolve publishes the terminal state if the request is still
 // pending. It is the single place where states change, which makes
 // terminal states immutable (first writer wins) and guarantees exactly
 // one event per request.
 func (s *Service) resolve(id string, state State, by string) (Outcome, error) {
+	return s.resolveWith(id, state, by, "")
+}
+
+func (s *Service) resolveWith(id string, state State, by, response string) (Outcome, error) {
 	s.mu.Lock()
 	e, err := s.lookupLocked(id)
 	if err != nil {
@@ -253,6 +270,9 @@ func (s *Service) resolve(id string, state State, by string) (Outcome, error) {
 	e.req.State = state
 	e.req.Answered = s.now()
 	e.req.By = by
+	if response != "" {
+		e.req.Response = response
+	}
 	if e.timer != nil {
 		e.timer.Stop()
 	}

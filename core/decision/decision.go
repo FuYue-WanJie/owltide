@@ -108,3 +108,29 @@ func (l *Logger) Log(r Record) error {
 
 // Close flushes and closes the file.
 func (l *Logger) Close() error { return l.f.Close() }
+
+// AppendEvent writes one arbitrary event line (e.g. permission
+// decisions) to the same decisions.jsonl, append-only. Field values are
+// written verbatim: callers must pass audit-safe values only (no
+// payload bodies, keys or endpoint addresses).
+func AppendEvent(dir, event string, fields map[string]any) error {
+	rec := map[string]any{"ts": time.Now().UTC().Format(time.RFC3339), "event": event}
+	for k, v := range fields {
+		rec[k] = v
+	}
+	line, err := json.Marshal(rec)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(filepath.Join(dir, "decisions.jsonl"),
+		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = f.Write(append(line, '\n'))
+	return err
+}

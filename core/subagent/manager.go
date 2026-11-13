@@ -33,6 +33,7 @@ import (
 	"github.com/FuYue-WanJie/owltide/core/sessionlog"
 	"github.com/FuYue-WanJie/owltide/core/spill"
 	"github.com/FuYue-WanJie/owltide/core/tool"
+	"github.com/FuYue-WanJie/owltide/internal/perm"
 )
 
 // Modes for agent_start.
@@ -118,6 +119,12 @@ type ManagerOpts struct {
 	// Confirm routes dangerous actions to the human terminal.
 	// In non-interactive mode this is nil and requests are refused.
 	Confirm tool.Confirmer
+	// Perm is the permission service (P2b-M14): when set, sub-agent
+	// confirmations go through Ask→Wait and carry the sub-agent's id
+	// and role in Source.
+	Perm *perm.Service
+	// ConfirmSrc is the permission-aware confirmer used with Perm.
+	ConfirmSrc func(src perm.Source, prompt string) bool
 
 	// SessLog is the main conversation's append-only message log
 	// (core/sessionlog). Finished sub-agent results are folded into it
@@ -595,6 +602,14 @@ func (m *Manager) WriteGate() *writeGate { return m.writeTokenGate }
 // with the sub-agent id and role so the user knows who is asking, and
 // requests are serialized (parallel sessions queue on one terminal).
 func (m *Manager) confirmFor(s *Session) tool.Confirmer {
+	if m.opts.Perm != nil && m.opts.ConfirmSrc != nil {
+		src := perm.Source{Agent: s.ID, Role: s.Role, Session: m.opts.SessionID}
+		return func(prompt string) bool {
+			m.confirmMu.Lock()
+			defer m.confirmMu.Unlock()
+			return m.opts.ConfirmSrc(src, prompt)
+		}
+	}
 	if m.opts.Confirm == nil {
 		return nil
 	}

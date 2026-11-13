@@ -25,6 +25,7 @@ import (
 	"github.com/FuYue-WanJie/owltide/core/spill"
 	"github.com/FuYue-WanJie/owltide/core/store"
 	"github.com/FuYue-WanJie/owltide/core/tool"
+	"github.com/FuYue-WanJie/owltide/internal/perm"
 )
 
 // fakeLLM2 is a scripted model server shared by subagent tests.
@@ -1721,5 +1722,33 @@ func TestDefaultBudgetReservesGeneral(t *testing.T) {
 	release()
 	if got := f.parent.RemainingTokens(); got != 400000 {
 		t.Fatalf("after release = %d, want 400000", got)
+	}
+}
+
+// TestConfirmSourceCarriesSubagentIdentity: permission-aware
+// confirmations from a sub-agent carry its id and role in Source
+// (P2b-M14).
+func TestConfirmSourceCarriesSubagentIdentity(t *testing.T) {
+	f := newFixture(t, nil, fxOpts{})
+	svc := perm.New(perm.Options{})
+	var got perm.Source
+	f.m.opts.Perm = svc
+	f.m.opts.ConfirmSrc = func(src perm.Source, prompt string) bool {
+		got = src
+		return true
+	}
+	s := &Session{ID: "sub-abc123", Role: "general"}
+	cf := f.m.confirmFor(s)
+	if cf == nil {
+		t.Fatal("confirmFor returned nil with a permission service wired")
+	}
+	if !cf("danger") {
+		t.Fatal("confirm must pass through")
+	}
+	if got.Agent != "sub-abc123" || got.Role != "general" {
+		t.Fatalf("source = %+v, want sub-abc123/general", got)
+	}
+	if got.Session != f.m.opts.SessionID {
+		t.Fatalf("source session = %q, want %q", got.Session, f.m.opts.SessionID)
 	}
 }

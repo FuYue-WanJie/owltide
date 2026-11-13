@@ -973,3 +973,19 @@ func TestRunBudgetIndependentOfContextWindow(t *testing.T) {
 		t.Fatalf("explicit budget = %d, want 123", got)
 	}
 }
+
+// TestAskUserTimeoutMessageVerbatim: when the permission service times
+// out, the model receives the documented timeout text exactly (no
+// answer mark, not treated as user data).
+func TestAskUserTimeoutMessageVerbatim(t *testing.T) {
+	asker := &AskUserTool{Asker: func(string, []string) (string, error) {
+		return AskTimeoutMessage, nil
+	}}
+	out, err := asker.Call(context.Background(), json.RawMessage(`{"question":"q?"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != AskTimeoutMessage {
+		t.Fatalf("result = %q, want the timeout message verbatim", out)
+	}
+}

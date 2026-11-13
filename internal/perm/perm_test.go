@@ -7,6 +7,7 @@ package perm
 import (
 	"context"
 	"errors"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -262,5 +263,88 @@ func TestDefaults(t *testing.T) {
 	}
 	if svc.Timeout() != 300*time.Second {
 		t.Fatalf("default timeout = %v, want 300s", svc.Timeout())
+	}
+}
+
+// TestPendingNumericOrder: 12+ pending requests list as req-1..req-12
+// (numeric order, not string order where req-10 < req-9).
+func TestPendingNumericOrder(t *testing.T) {
+	svc := New(Options{})
+	for i := 0; i < 12; i++ {
+		if _, err := svc.Ask(KindAskUser, testSource("s1"), nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p := svc.Pending()
+	if len(p) != 12 {
+		t.Fatalf("pending = %d, want 12", len(p))
+	}
+	for i, r := range p {
+		want := "req-" + strconv.Itoa(i+1)
+		if r.ID != want {
+			t.Fatalf("position %d = %s, want %s (numeric order)", i, r.ID, want)
+		}
+	}
+}
+
+// TestRetentionCap: only the most recent Retain terminal requests stay
+// queryable; older ones report ErrExpired (not ErrUnknown).
+func TestRetentionCap(t *testing.T) {
+	rec := &eventRecorder{}
+	svc := New(Options{Retain: 3, RetainFor: time.Hour, Events: rec.sink})
+	var ids []string
+	for i := 0; i < 5; i++ {
+		r, err := svc.Ask(KindApproval, testSource("s1"), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, r.ID)
+		if _, err := svc.Answer(r.ID, StateApproved, "cli"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Get triggers the reap; the oldest two are gone.
+	for _, id := range ids[:2] {
+		if _, err := svc.Get(id); !errors.Is(err, ErrExpired) {
+			t.Fatalf("Get(%s) = %v, want ErrExpired", id, err)
+		}
+	}
+	for _, id := range ids[2:] {
+		if _, err := svc.Get(id); err != nil {
+			t.Fatalf("Get(%s) must still work: %v", id, err)
+		}
+	}
+	// Never-issued ids stay ErrUnknown.
+	if _, err := svc.Get("req-999"); !errors.Is(err, ErrUnknown) {
+		t.Fatalf("unknown id = %v, want ErrUnknown", err)
+	}
+}
+
+// TestRetentionTTL: terminal requests older than RetainFor are dropped
+// even when under the count cap.
+func TestRetentionTTL(t *testing.T) {
+	now := time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)
+	svc := New(Options{Retain: 100, RetainFor: 10 * time.Minute,
+		Now: func() time.Time { return now }})
+	r, _ := svc.Ask(KindApproval, testSource("s1"), nil)
+	if _, err := svc.Answer(r.ID, StateApproved, "cli"); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(11 * time.Minute)
+	if _, err := svc.Get(r.ID); !errors.Is(err, ErrExpired) {
+		t.Fatalf("expired id = %v, want ErrExpired", err)
+	}
+}
+
+// TestPendingNeverReaped: pending requests survive retention pressure.
+func TestPendingNeverReaped(t *testing.T) {
+	svc := New(Options{Retain: 1, RetainFor: time.Hour})
+	pending, _ := svc.Ask(KindAskUser, testSource("s1"), nil)
+	for i := 0; i < 4; i++ {
+		r, _ := svc.Ask(KindApproval, testSource("s1"), nil)
+		svc.Answer(r.ID, StateApproved, "cli")
+	}
+	if _, err := svc.Get(pending.ID); err != nil {
+		t.Fatalf("pending request was reaped: %v", err)
 	}
 }

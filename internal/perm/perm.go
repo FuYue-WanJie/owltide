@@ -23,7 +23,11 @@ package perm
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -96,6 +100,22 @@ type EventFunc func(event string, fields map[string]any)
 // permissions.timeout_sec, default 300s).
 const DefaultTimeout = 300 * time.Second
 
+// Retention defaults: at most DefaultRetain terminal requests are kept,
+// and any terminal request older than DefaultRetainFor is dropped.
+const (
+	DefaultRetain    = 256
+	DefaultRetainFor = 10 * time.Minute
+)
+
+// Errors for lookups of requests that no longer exist.
+var (
+	// ErrUnknown is returned for an id that was never issued.
+	ErrUnknown = errors.New("permission: unknown request")
+	// ErrExpired is returned for a request that reached a terminal
+	// state and was removed by the retention policy.
+	ErrExpired = errors.New("permission: request expired")
+)
+
 // Options configures a Service.
 type Options struct {
 	// Timeout bounds how long a request may stay pending; the expiry
@@ -106,23 +126,39 @@ type Options struct {
 	Events EventFunc
 	// Now overrides the clock (tests); nil means time.Now.
 	Now func() time.Time
+	// Retain caps how many terminal requests stay queryable; <=0 means
+	// DefaultRetain.
+	Retain int
+	// RetainFor drops terminal requests older than this; <=0 means
+	// DefaultRetainFor.
+	RetainFor time.Duration
 }
 
 type entry struct {
 	req   Request
+	seq   int
 	done  chan struct{}
 	timer *time.Timer
 }
 
 // Service is the in-memory permission table.
 type Service struct {
-	mu      sync.Mutex
-	seq     int
-	reqs    map[string]*entry
-	timeout time.Duration
-	events  EventFunc
-	now     func() time.Time
+	mu        sync.Mutex
+	seq       int
+	reqs      map[string]*entry
+	timeout   time.Duration
+	retain    int
+	retainFor time.Duration
+	events    EventFunc
+	now       func() time.Time
+	// expired tombstones recently reaped ids so Get can say "expired"
+	// instead of "unknown". Bounded (expiredMax) to stay small.
+	expired   map[string]bool
+	expiredAt []string
 }
+
+// expiredMax caps the tombstone ring.
+const expiredMax = 4096
 
 // New builds a Service.
 func New(opt Options) *Service {
@@ -134,11 +170,22 @@ func New(opt Options) *Service {
 	if now == nil {
 		now = time.Now
 	}
+	retain := opt.Retain
+	if retain <= 0 {
+		retain = DefaultRetain
+	}
+	retainFor := opt.RetainFor
+	if retainFor <= 0 {
+		retainFor = DefaultRetainFor
+	}
 	return &Service{
-		reqs:    map[string]*entry{},
-		timeout: timeout,
-		events:  opt.Events,
-		now:     now,
+		reqs:      map[string]*entry{},
+		timeout:   timeout,
+		retain:    retain,
+		retainFor: retainFor,
+		events:    opt.Events,
+		now:       now,
+		expired:   map[string]bool{},
 	}
 }
 
@@ -154,6 +201,7 @@ func (s *Service) Ask(kind Kind, src Source, payload any) (Request, error) {
 		src.Agent = "main"
 	}
 	s.mu.Lock()
+	s.reapLocked()
 	s.seq++
 	id := fmt.Sprintf("req-%d", s.seq)
 	r := Request{
@@ -164,7 +212,7 @@ func (s *Service) Ask(kind Kind, src Source, payload any) (Request, error) {
 		Created: s.now(),
 		State:   StatePending,
 	}
-	e := &entry{req: r, done: make(chan struct{})}
+	e := &entry{req: r, seq: s.seq, done: make(chan struct{})}
 	e.timer = time.AfterFunc(s.timeout, func() {
 		_, _ = s.resolve(id, StateTimeout, "timeout")
 	})
@@ -192,10 +240,10 @@ func (s *Service) Answer(id string, state State, by string) (Outcome, error) {
 // one event per request.
 func (s *Service) resolve(id string, state State, by string) (Outcome, error) {
 	s.mu.Lock()
-	e, ok := s.reqs[id]
-	if !ok {
+	e, err := s.lookupLocked(id)
+	if err != nil {
 		s.mu.Unlock()
-		return Outcome{}, fmt.Errorf("permission: unknown request %q", id)
+		return Outcome{}, err
 	}
 	if e.req.State != StatePending {
 		out := Outcome{Request: e.req}
@@ -230,10 +278,10 @@ func (s *Service) resolve(id string, state State, by string) (Outcome, error) {
 // cancellation is explicit, see CancelSession).
 func (s *Service) Wait(ctx context.Context, id string) (Outcome, error) {
 	s.mu.Lock()
-	e, ok := s.reqs[id]
+	e, err := s.lookupLocked(id)
 	s.mu.Unlock()
-	if !ok {
-		return Outcome{}, fmt.Errorf("permission: unknown request %q", id)
+	if err != nil {
+		return Outcome{}, err
 	}
 	select {
 	case <-e.done:
@@ -244,32 +292,101 @@ func (s *Service) Wait(ctx context.Context, id string) (Outcome, error) {
 	}
 }
 
-// Get returns a snapshot of one request.
+// Get returns a snapshot of one request. A request removed by the
+// retention policy yields ErrExpired (distinct from ErrUnknown).
 func (s *Service) Get(id string) (Outcome, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.reapLocked()
 	e, ok := s.reqs[id]
 	if !ok {
-		return Outcome{}, fmt.Errorf("permission: unknown request %q", id)
+		if s.expired[id] {
+			return Outcome{}, fmt.Errorf("%w: %q", ErrExpired, id)
+		}
+		return Outcome{}, fmt.Errorf("%w: %q", ErrUnknown, id)
 	}
 	return Outcome{Request: e.req}, nil
 }
 
-// Pending returns snapshots of every pending request (oldest first).
+// lookupLocked classifies a missing id.
+func (s *Service) lookupLocked(id string) (*entry, error) {
+	if e, ok := s.reqs[id]; ok {
+		return e, nil
+	}
+	if s.expired[id] {
+		return nil, fmt.Errorf("%w: %q", ErrExpired, id)
+	}
+	return nil, fmt.Errorf("%w: %q", ErrUnknown, id)
+}
+
+// reapLocked drops terminal requests per the retention policy: first
+// those older than RetainFor, then the oldest beyond Retain. Pending
+// requests are never dropped. Removed ids are remembered (bounded) so
+// Get can report them as expired.
+func (s *Service) reapLocked() {
+	now := s.now()
+	var terminal []*entry
+	for id, e := range s.reqs {
+		if e.req.State == StatePending {
+			continue
+		}
+		if now.Sub(e.req.Answered) > s.retainFor {
+			s.dropLocked(id)
+			continue
+		}
+		terminal = append(terminal, e)
+	}
+	if len(terminal) > s.retain {
+		sort.Slice(terminal, func(i, j int) bool { return terminal[i].seq < terminal[j].seq })
+		for i := 0; i < len(terminal)-s.retain; i++ {
+			s.dropLocked(terminal[i].req.ID)
+		}
+	}
+}
+
+func (s *Service) dropLocked(id string) {
+	delete(s.reqs, id)
+	if s.expired[id] {
+		return
+	}
+	s.expired[id] = true
+	s.expiredAt = append(s.expiredAt, id)
+	if len(s.expiredAt) > expiredMax {
+		old := s.expiredAt[0]
+		s.expiredAt = s.expiredAt[1:]
+		delete(s.expired, old)
+	}
+}
+
+// seqOf parses the numeric part of a request id (tests/diagnostics).
+func seqOf(id string) int {
+	n, err := strconv.Atoi(strings.TrimPrefix(id, "req-"))
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+// Pending returns snapshots of every pending request, oldest first.
+// Ordering is by numeric sequence (req-9 before req-10), not by string.
 func (s *Service) Pending() []Request {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := make([]Request, 0, len(s.reqs))
+	s.reapLocked()
+	type pair struct {
+		seq int
+		req Request
+	}
+	ps := make([]pair, 0, len(s.reqs))
 	for _, e := range s.reqs {
 		if e.req.State == StatePending {
-			out = append(out, e.req)
+			ps = append(ps, pair{e.seq, e.req})
 		}
 	}
-	// seq order = creation order
-	for i := 1; i < len(out); i++ {
-		for j := i; j > 0 && out[j].ID < out[j-1].ID; j-- {
-			out[j], out[j-1] = out[j-1], out[j]
-		}
+	sort.Slice(ps, func(i, j int) bool { return ps[i].seq < ps[j].seq })
+	out := make([]Request, 0, len(ps))
+	for _, p := range ps {
+		out = append(out, p.req)
 	}
 	return out
 }

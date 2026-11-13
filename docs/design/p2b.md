@@ -328,7 +328,7 @@ type State string // pending | approved | denied | timeout | cancelled
 ### 6.5 里程碑拆分
 
 - **P2b-M13**：包结构 + 表 + 状态机 + 先到先得 + 超时默认拒绝 + decisions 事件 + 测试 —— **已实现**（`internal/perm`：`Service.Ask/Answer/Wait/Get/Pending/CancelSession`；事件 `{event:"permission", id, kind, state, by, source}` 无 payload；`permissions.timeout_sec` 默认 300s；ask_user 超时语义见上）
-- **P2b-M14**：ask_user / guard confirmer 迁移到权限服务（行为兼容）+ 测试
+- **P2b-M14**：ask_user / guard confirmer 迁移到权限服务（行为兼容）+ 测试 —— **已实现**（`cmd/owltide/permcli.go`：终端作为 `cli` 回答端，Ask→Wait；guard 超时=拒绝；ask_user 超时=返回 `agent.AskTimeoutMessage`；子代理请求 Source 带 id+role；chat 退出/Ctrl-C/EOF 经 cleanup 调 `CancelSession`）
 - **P2b-M15**：session allow（按命令、列出、撤销）+ 社交入口只读限制 + 测试
 - **P2b-M16**：serve SSE 审批必达通道 + Last-Event-ID 补发接线（与 serve-api.md 同步）+ 测试
 

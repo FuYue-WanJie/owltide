@@ -27,6 +27,7 @@ import (
 	"github.com/FuYue-WanJie/owltide/core/store"
 	"github.com/FuYue-WanJie/owltide/core/subagent"
 	"github.com/FuYue-WanJie/owltide/core/tool"
+	"github.com/FuYue-WanJie/owltide/internal/perm"
 	"github.com/FuYue-WanJie/owltide/internal/serve"
 )
 
@@ -267,6 +268,30 @@ func setup(resumeID string, router bool) (agent.Options, func(), *subagent.Manag
 	home := p.Home()
 	workDir, _ := os.Getwd()
 
+	// Session identity comes first: the permission service (M14) and
+	// every downstream store need it.
+	sessionID := ""
+	if resumeID != "" {
+		// Resume: reuse the session id so the session log, spill dir
+		// and sub transcripts continue where the crashed process
+		// left off.
+		sessionID = resumeID
+		fmt.Println("session id:", sessionID, "(resumed)")
+	} else {
+		sessionID = time.Now().UTC().Format("20060102-150405")
+		fmt.Println("session id:", sessionID)
+	}
+
+	// P2b-M14: the permission table every "waiting on the user" state
+	// goes through. Terminal transitions are audited to the decisions
+	// log (id/kind/state/by/source only — never payload bodies).
+	permSvc := perm.New(perm.Options{
+		Timeout: cfg.PermissionTimeout(),
+		Events: func(event string, fields map[string]any) {
+			_ = decision.AppendEvent(platform.ConfigDir(home)+"/logs", event, fields)
+		},
+	})
+
 	var dl *decision.Logger
 	if cfg.Logging.Decisions {
 		dl, err = decision.Open(platform.ConfigDir(home) + "/logs")
@@ -303,7 +328,9 @@ func setup(resumeID string, router bool) (agent.Options, func(), *subagent.Manag
 	if cfg.Router() {
 		cfg.System += routerSystemNote
 	}
-	reg.Register(&agent.AskUserTool{Asker: askFromStdin})
+	reg.Register(&agent.AskUserTool{Asker: func(q string, ch []string) (string, error) {
+		return askViaPerm(permSvc, sessionID, promptAsk, q, ch)
+	}})
 
 	// Self-evolution: layout + auto-commit store + evolution tools.
 	st, err := openStore()
@@ -312,18 +339,11 @@ func setup(resumeID string, router bool) (agent.Options, func(), *subagent.Manag
 	}
 	// Dangerous actions (rm -rf, git push --force, locks.yaml writes)
 	// ask the human at the terminal; the model can never self-approve.
-	reg.SetConfirmer(confirmFromStdin)
-	sessionID := ""
-	if resumeID != "" {
-		// Resume: reuse the session id so the session log, spill dir
-		// and sub transcripts continue where the crashed process
-		// left off.
-		sessionID = resumeID
-		fmt.Println("session id:", sessionID, "(resumed)")
-	} else {
-		sessionID = time.Now().UTC().Format("20060102-150405")
-		fmt.Println("session id:", sessionID)
-	}
+	// M14: confirmations go through the permission service (timeout =
+	// deny); the terminal answers as endpoint "cli".
+	reg.SetConfirmer(func(prompt string) bool {
+		return confirmViaPerm(permSvc, perm.Source{Agent: "main", Session: sessionID}, promptConfirm, prompt)
+	})
 	// Transaction-level backstop: any tool mutating protected files
 	// (including run_shell tricks) gets rolled back and logged.
 	gd := &guard.Guard{Root: st.Dir, St: st}
@@ -388,8 +408,12 @@ func setup(resumeID string, router bool) (agent.Options, func(), *subagent.Manag
 		BaseReg: reg, Agents: roleDefs, Guard: gd, Spill: sp,
 		Decisions: dl, SessionID: sessionID, WorkDir: workDir,
 		TodoDir: sp.Dir, Loop: agent.LoopConfig{}, DecisionsOn: cfg.Logging.Decisions,
-		RouterMode:   cfg.Router(),
-		Confirm:      confirmFromStdin,
+		RouterMode: cfg.Router(),
+		Confirm:    promptConfirm,
+		Perm:       permSvc,
+		ConfirmSrc: func(src perm.Source, prompt string) bool {
+			return confirmViaPerm(permSvc, src, promptConfirm, prompt)
+		},
 		SessLog:      sessLog,
 		SubLogDir:    platform.ConfigDir(home) + "/logs/sub",
 		EventsLogDir: platform.ConfigDir(home) + "/logs",
@@ -428,6 +452,9 @@ func setup(resumeID string, router bool) (agent.Options, func(), *subagent.Manag
 	}
 
 	cleanup := func() {
+		// Session end: no request may stay pending (chat exit, EOF,
+		// Ctrl-C — every path runs this defer).
+		permSvc.CancelSession(sessionID)
 		_ = sessLog.Close()
 		_ = lock.Release()
 	}
@@ -554,43 +581,6 @@ func restoreSession(a *agent.Agent, resumeID string) {
 	}
 	fmt.Printf("resumed session %s (%d messages, %d tool calls repaired)\n",
 		resumeID, len(msgs), n)
-}
-
-// askFromStdin asks the user an open question on the terminal (with
-// optional choices; free text always allowed).
-func askFromStdin(question string, choices []string) (string, error) {
-	fmt.Printf("\n%s\n", question)
-	if len(choices) > 0 {
-		for i, c := range choices {
-			fmt.Printf("  %d) %s\n", i+1, c)
-		}
-		fmt.Println("（输入选项序号或自由文本，回车提交）")
-	} else {
-		fmt.Print("> ")
-	}
-	sc := bufio.NewScanner(os.Stdin)
-	if !sc.Scan() {
-		return "", fmt.Errorf("no answer provided")
-	}
-	ans := strings.TrimSpace(sc.Text())
-	// Numeric choice maps back to the option text.
-	if n := 0; len(choices) > 0 {
-		if _, err := fmt.Sscanf(ans, "%d", &n); err == nil && n >= 1 && n <= len(choices) {
-			return choices[n-1], nil
-		}
-	}
-	return ans, nil
-}
-
-// confirmFromStdin asks the user a yes/no question on the terminal.
-func confirmFromStdin(prompt string) bool {
-	fmt.Printf("\n%s [y/N] > ", prompt)
-	sc := bufio.NewScanner(os.Stdin)
-	if !sc.Scan() {
-		return false
-	}
-	ans := strings.ToLower(strings.TrimSpace(sc.Text()))
-	return ans == "y" || ans == "yes"
 }
 
 // runServe hosts the read-only HTTP API. Bind address defaults to

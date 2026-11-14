@@ -128,7 +128,7 @@ func newFixture(t *testing.T, script func(n int, req model.Request) string, o fx
 	must(t, reg.Register(&tool.EditFile{}))
 	must(t, reg.Register(tool.ListDir{}))
 	must(t, reg.Register(tool.NewShell("/bin/sh", "-c", workDir, 5)))
-	must(t, reg.Register(agent.TodoTool{Dir: t.TempDir()}))
+	must(t, reg.Register(agent.TodoTool{Dir: t.TempDir(), Upgrade: agent.NewTodoUpgrade()}))
 
 	gd := &guard.Guard{Root: cfgDir, St: st}
 

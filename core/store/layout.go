@@ -9,7 +9,7 @@ import (
 )
 
 // Layout of the ~/.owltide configuration directory.
-var Dirs = []string{"agents", "skills", "memory", "channels", "logs", "sessions"}
+var Dirs = []string{"agents", "skills", "memory", "channels", "logs", "sessions", "goals", "plans"}
 
 const gitignore = "logs/\nspill/\nsessions/\n"
 

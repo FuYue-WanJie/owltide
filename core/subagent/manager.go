@@ -28,6 +28,7 @@ import (
 	"github.com/FuYue-WanJie/owltide/core/agents"
 	"github.com/FuYue-WanJie/owltide/core/config"
 	"github.com/FuYue-WanJie/owltide/core/decision"
+	"github.com/FuYue-WanJie/owltide/core/goalplan"
 	"github.com/FuYue-WanJie/owltide/core/guard"
 	"github.com/FuYue-WanJie/owltide/core/model"
 	"github.com/FuYue-WanJie/owltide/core/sessionlog"
@@ -123,6 +124,8 @@ type ManagerOpts struct {
 	// confirmations go through Ask→Wait and carry the sub-agent's id
 	// and role in Source.
 	Perm *perm.Service
+	// GoalPlan resolves goal:<id> / plan:<id> context refs (P2b-M2).
+	GoalPlan *goalplan.Manager
 	// ConfirmSrc is the permission-aware confirmer used with Perm.
 	ConfirmSrc func(src perm.Source, prompt string) bool
 
@@ -806,6 +809,17 @@ func (m *Manager) resolveContextRefs(refs []string) (string, error) {
 				return "", fmt.Errorf("context ref %q: %v", ref, err)
 			}
 			content = data
+		} else if strings.HasPrefix(ref, "goal:") || strings.HasPrefix(ref, "plan:") {
+			// P2b-M2: goal/plan references resolve through the store.
+			// Unknown ids error out (never silently ignored).
+			if m.opts.GoalPlan == nil {
+				return "", fmt.Errorf("context ref %q: no goal/plan store configured", ref)
+			}
+			doc, err := m.opts.GoalPlan.Load(strings.TrimPrefix(ref, strings.SplitN(ref, ":", 2)[0]+":"))
+			if err != nil {
+				return "", fmt.Errorf("context ref %q: %v", ref, err)
+			}
+			content = doc.Render()
 		} else {
 			data, err := m.readWorkFile(ref)
 			if err != nil {

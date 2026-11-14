@@ -55,6 +55,20 @@ func (g *Guard) paths() []string {
 	for _, rel := range []string{"locks.yaml", "config.yaml"} {
 		add(filepath.Join(g.Root, rel))
 	}
+	// P2b-M1: goal/plan document frontmatter is protected. The
+	// documents live in the store (snapshot-committed), but the guard's
+	// rollback is the transaction-level backstop against run_shell
+	// tricks between model calls.
+	for _, sub := range []string{"goals", "plans"} {
+		dir := filepath.Join(g.Root, sub)
+		if entries, err := os.ReadDir(dir); err == nil {
+			for _, e := range entries {
+				if !e.IsDir() && strings.HasSuffix(e.Name(), ".md") {
+					add(filepath.Join(dir, e.Name()))
+				}
+			}
+		}
+	}
 	if g.St != nil {
 		if locks, err := g.St.LoadLocks(); err == nil {
 			for _, id := range locks.Items {

@@ -54,10 +54,32 @@ func (c LoopConfig) restateBytes() int {
 	return 500
 }
 
-// TodoTool maintains todo.md in the session directory.
-type TodoTool struct{ Dir string }
+// TodoTool maintains todo.md in the session directory (P2b-M1: with
+// frontmatter; legacy files are upgraded on the first write).
+type TodoTool struct {
+	Dir      string
+	Session  string
+	Upgrade  *TodoUpgrade
+	upgraded bool
+}
 
 func (t TodoTool) todoPath() string { return filepath.Join(t.Dir, "todo.md") }
+
+// ensureUpgrade runs the frontmatter upgrade once per session (lazy:
+// only when a write happens).
+func (t TodoTool) ensureUpgrade() error {
+	if t.upgraded {
+		return nil
+	}
+	if t.Upgrade == nil {
+		t.Upgrade = NewTodoUpgrade()
+	}
+	if err := upgradeTodo(t.Dir, t.Session, t.Upgrade); err != nil {
+		return err
+	}
+	t.upgraded = true
+	return nil
+}
 
 // Schema implements tool.Tool.
 func (t TodoTool) Schema() tool.Definition {
@@ -86,7 +108,19 @@ func (t TodoTool) Call(_ contextx, args json.RawMessage) (string, error) {
 	if err := os.MkdirAll(t.Dir, 0o755); err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(t.todoPath(), []byte(a.Content), 0o600); err != nil {
+	if err := t.ensureUpgrade(); err != nil {
+		return "", err
+	}
+	// The model writes the body; the frontmatter is rendered here and
+	// is protected (see guard wiring) — a crash never leaves a torn
+	// file (temp + rename in the same directory).
+	doc := t.renderDoc(a.Content)
+	path := t.todoPath()
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(doc), 0o600); err != nil {
+		return "", err
+	}
+	if err := os.Rename(tmp, path); err != nil {
 		return "", err
 	}
 	return "todo saved", nil

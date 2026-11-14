@@ -899,7 +899,7 @@ func TestRouterViolationLimitEndsTurn(t *testing.T) {
 	var abortReason string
 	reg := tool.NewRegistry()
 	must(reg.Register(&tool.WriteFile{}))
-	must(reg.Register(TodoTool{Dir: t.TempDir()}))
+	must(reg.Register(TodoTool{Dir: t.TempDir(), Upgrade: NewTodoUpgrade()}))
 
 	cfg := config.Default()
 	cfg.Model.BaseURL = "https://x"

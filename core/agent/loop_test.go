@@ -190,7 +190,7 @@ func TestTodoRestateAppended(t *testing.T) {
 	})
 	a, todoDir := loopAgent(t, srv.URL, nil)
 
-	td := TodoTool{Dir: todoDir}
+	td := TodoTool{Dir: todoDir, Upgrade: NewTodoUpgrade()}
 	if _, err := td.Call(context.Background(), json.RawMessage(`{"content":"# Goal\n- ship it"}`)); err != nil {
 		t.Fatal(err)
 	}

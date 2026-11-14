@@ -53,6 +53,10 @@ type Options struct {
 	// do not call it. The sub-agent manager uses it to stop running
 	// sub-agents and release their reservations.
 	OnRunEnd func(reason string)
+	// GoalInject, when set, supplies the per-call goal/plan
+	// restatement (P2b-M2). It is appended to the message VIEW after
+	// the stable prefix — the prefix hash never changes.
+	GoalInject func() string
 	// RouterMode turns on delegate-only enforcement: tool calls for
 	// anything outside AllowedTools are refused by the executor (and
 	// reported through OnRouterViolation when set) even if the model

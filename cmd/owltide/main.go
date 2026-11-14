@@ -22,6 +22,7 @@ import (
 	"github.com/FuYue-WanJie/owltide/core/config"
 	"github.com/FuYue-WanJie/owltide/core/decision"
 	"github.com/FuYue-WanJie/owltide/core/evolve"
+	"github.com/FuYue-WanJie/owltide/core/goalplan"
 	"github.com/FuYue-WanJie/owltide/core/guard"
 	"github.com/FuYue-WanJie/owltide/core/model"
 	"github.com/FuYue-WanJie/owltide/core/platform"
@@ -338,6 +339,12 @@ func setup(resumeID string, router, api bool) (agent.Options, func(), *subagent.
 		apiSrv.Perm = permSvc
 	}
 
+	// P2b-M2: goal/plan injection rides the [AUTO] view channel after
+	// the stable prefix — the prefix hash stays byte-identical. gp is
+	// declared later; resolve it lazily per call.
+	var gpRef *goalplan.Manager
+	injector := func() string { return (goalplan.Injector{M: gpRef}).Inject() }
+
 	var dl *decision.Logger
 	if cfg.Logging.Decisions {
 		dl, err = decision.Open(platform.ConfigDir(home) + "/logs")
@@ -430,7 +437,7 @@ func setup(resumeID string, router, api bool) (agent.Options, func(), *subagent.
 	if err != nil {
 		return agent.Options{}, nil, nil, nil, err
 	}
-	if err := reg.Register(agent.TodoTool{Dir: sp.Dir}); err != nil {
+	if err := reg.Register(agent.TodoTool{Dir: sp.Dir, Session: sessionID, Upgrade: agent.NewTodoUpgrade()}); err != nil {
 		return agent.Options{}, nil, nil, nil, err
 	}
 
@@ -453,6 +460,47 @@ func setup(resumeID string, router, api bool) (agent.Options, func(), *subagent.
 	if err != nil {
 		return agent.Options{}, nil, nil, nil, err
 	}
+	// P2b-M1/M2: goal/plan tools. Coordination is the main agent's job
+	// (documented in p2b.md §1.2) — the router allowlist carries these
+	// names; refusals there would be wrong. blocked -> active goes
+	// through the permission service (kind goal_unblock); terminal
+	// transitions land in the decisions log; store auto-commit covers
+	// goals/plans.
+	gpRef = goalplan.New(st.Dir)
+	gp := gpRef
+	gpHooks := &goalplan.Hooks{
+		M: gp, SessionID: sessionID, Perm: permSvc,
+		Events: func(event string, fields map[string]any) {
+			_ = decision.AppendEvent(platform.ConfigDir(home)+"/logs", event, fields)
+		},
+		OnStoreChange: func(reason string) {
+			if _, _, aerr := st.AutoCommit(store.CommitMeta{
+				Who: "agent", Tool: "goalplan", Game: sessionID, Reason: reason,
+			}); aerr != nil {
+				fmt.Fprintln(os.Stderr, "warning: goalplan auto-commit:", aerr)
+			}
+		},
+		ConfirmUnblock: func(goalID, reason string) (bool, error) {
+			req, aerr := permSvc.Ask(perm.Kind("goal_unblock"),
+				perm.Source{Agent: "main", Session: sessionID},
+				map[string]string{"goal": goalID, "reason": reason})
+			if aerr != nil {
+				return false, aerr
+			}
+			out, werr := permSvc.Wait(context.Background(), req.ID)
+			if werr != nil {
+				return false, werr
+			}
+			if out.Request.State != perm.StateApproved {
+				return false, fmt.Errorf("request %s (%s)", req.ID, out.Request.State)
+			}
+			return true, nil
+		},
+	}
+	if err := goalplan.NewTools(reg, gpHooks); err != nil {
+		return agent.Options{}, nil, nil, nil, err
+	}
+
 	mgr, err := subagent.NewManager(subagent.ManagerOpts{
 		Config: cfg, Client: model.NewClient(cfg.Model.BaseURL, key, nil),
 		BaseReg: reg, Agents: roleDefs, Guard: gd, Spill: sp,
@@ -461,6 +509,7 @@ func setup(resumeID string, router, api bool) (agent.Options, func(), *subagent.
 		RouterMode: cfg.Router(),
 		Confirm:    promptConfirm,
 		Perm:       permSvc,
+		GoalPlan:   gp,
 		ConfirmSrc: func(src perm.Source, prompt string) bool {
 			return confirmViaPerm(permSvc, src, promptConfirm, prompt)
 		},
@@ -517,6 +566,7 @@ func setup(resumeID string, router, api bool) (agent.Options, func(), *subagent.
 	}
 
 	return agent.Options{
+		GoalInject: injector,
 		Config:     cfg,
 		Client:     model.NewClient(cfg.Model.BaseURL, key, nil),
 		Tools:      reg,
@@ -531,6 +581,9 @@ func setup(resumeID string, router, api bool) (agent.Options, func(), *subagent.
 		AllowedTools: []string{
 			"agent_start", "agent_status", "agent_result", "agent_send",
 			"todo", "ask_user",
+			// P2b-M1: coordination tools (documented exception — these
+			// are not router violations).
+			"goal_create", "goal_update", "plan_create", "plan_update",
 		},
 		OnRouterViolation: func(toolName string) {
 			subagent.AppendEvent(platform.ConfigDir(home)+"/logs", "router_violation",

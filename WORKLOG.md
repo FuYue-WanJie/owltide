@@ -222,6 +222,7 @@ cmd/owltide/  CLI 入口（chat 交互 / run 一次性）
   - 事故记录：4bf19fa 提交不完整（cmd/owltide 新文件被 .gitignore 裸 `owltide` 规则忽略，git add 报错退出但 `| tail` 掩盖了推送真实退出码）——修正为 .gitignore 锚定 /owltide + 补充提交 6561ee8，未改写已推送历史；教训：推送后必须核对 origin/main 哈希，不能用 tail 后的 $? 判定推送结果
   - 验证：go build/vet 干净；go test -race -count=1 ./... 全绿（15 ok 包）；go test -race -count=10 ./internal/perm/ ./internal/serve/ ./core/tool/ 全绿；各次推送 hook 触发且区间复扫 clean
 
+- [2026-11-14] P2b-M1/M2 补遗 `6c9fd72`：serve goals/plans 视图接线（apiSrv.State.GoalDocs/PlanDocs 在 598afaa 中遗漏——它位于 apiSrv 初始化块，与工具注册块分离）
 - [2026-11-14] P2b-M1/M2：goal/plan/todo（按 p2b.md §1.1/§1.3/§1.6 已定答案）：
   - M1 `f5f921b`：新包 core/goalplan——Markdown+frontmatter 文档（goals/<date>-<slug>.md、plans/<date>-<slug>.md，id g-/p-，跨文件引用只用 id）；状态机（goal: active→done|blocked→archived；plan: active→done 需全部 todo 勾选|archived；非法迁移稳定错误且文件不动；blocked 需首行 blocked: <原因>）；blocked→active 走权限服务 kind=goal_unblock（超时/拒绝保持 blocked，Channel 来源只读拒绝）；四工具 goal_create/goal_update/plan_create/plan_update 进 router 白名单（协调动作，p2b.md §1.2 已注明）；guard 保护 goals/**、plans/**；原子写（唯一临时文件+rename，并发安全）；TodoTool 升级（todo.md 加 frontmatter，legacy 首写升级保内容）
   - M2 `598afaa`：注入——active goal（陈述+未勾验收标准）与 active plan（步骤）经 [AUTO] 通道按次注入，稳定前缀后（前缀哈希不变，测试断言）；2000 字符上限（超限先首行摘要、再仅 id）；context_refs 支持 goal:<id>/plan:<id>（未知 id 报错不静默）；迁移写 goal_update/plan_update decisions 事件（id/from/to，无正文）；serve GET /api/goals、/api/plans（只读）

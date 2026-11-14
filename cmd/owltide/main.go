@@ -314,6 +314,10 @@ func setup(resumeID string, router, api bool) (agent.Options, func(), *subagent.
 		fmt.Printf("serve api: http://%s (token %s)\n", ln.Addr(), tok)
 	}
 
+	// P2b-M1/M2: goal/plan store handle (declared early — serve views
+	// and agent options reference it lazily).
+	var gpRef *goalplan.Manager
+
 	// P2b-M14: the permission table every "waiting on the user" state
 	// goes through. Terminal transitions are audited to the decisions
 	// log (id/kind/state/by/source only — never payload bodies).
@@ -337,12 +341,40 @@ func setup(resumeID string, router, api bool) (agent.Options, func(), *subagent.
 	})
 	if apiSrv != nil {
 		apiSrv.Perm = permSvc
+		// Read-only goal/plan views (P2b-M2): id/status/refs only —
+		// bodies stay on disk, fetched on demand by the future UI.
+		apiSrv.State.GoalDocs = func() []map[string]any {
+			docs, err := gpRef.List(goalplan.KindGoal)
+			if err != nil {
+				return nil
+			}
+			out := make([]map[string]any, 0, len(docs))
+			for _, d := range docs {
+				out = append(out, map[string]any{
+					"id": d.ID, "status": d.Status, "file": d.FileName, "session": d.Session,
+				})
+			}
+			return out
+		}
+		apiSrv.State.PlanDocs = func() []map[string]any {
+			docs, err := gpRef.List(goalplan.KindPlan)
+			if err != nil {
+				return nil
+			}
+			out := make([]map[string]any, 0, len(docs))
+			for _, d := range docs {
+				out = append(out, map[string]any{
+					"id": d.ID, "status": d.Status, "file": d.FileName,
+					"goal": d.Goal, "session": d.Session,
+				})
+			}
+			return out
+		}
 	}
 
 	// P2b-M2: goal/plan injection rides the [AUTO] view channel after
 	// the stable prefix — the prefix hash stays byte-identical. gp is
 	// declared later; resolve it lazily per call.
-	var gpRef *goalplan.Manager
 	injector := func() string { return (goalplan.Injector{M: gpRef}).Inject() }
 
 	var dl *decision.Logger

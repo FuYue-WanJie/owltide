@@ -221,6 +221,11 @@ func (a *Agent) viewForModel() []model.Message {
 				model.Message{Role: model.RoleUser, Content: r})
 		}
 	}
+	if a.opts.GoalInject != nil {
+		if r := a.opts.GoalInject(); r != "" {
+			out = append(out, model.Message{Role: model.RoleUser, Content: r})
+		}
+	}
 	for _, n := range notices {
 		out = append(out, n)
 	}

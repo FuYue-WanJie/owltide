@@ -19,6 +19,7 @@ import (
 	"github.com/FuYue-WanJie/owltide/core/agent"
 	"github.com/FuYue-WanJie/owltide/core/agents"
 	"github.com/FuYue-WanJie/owltide/core/config"
+	"github.com/FuYue-WanJie/owltide/core/goalplan"
 	"github.com/FuYue-WanJie/owltide/core/guard"
 	"github.com/FuYue-WanJie/owltide/core/model"
 	"github.com/FuYue-WanJie/owltide/core/sessionlog"
@@ -1750,5 +1751,40 @@ func TestConfirmSourceCarriesSubagentIdentity(t *testing.T) {
 	}
 	if got.Session != f.m.opts.SessionID {
 		t.Fatalf("source session = %q, want %q", got.Session, f.m.opts.SessionID)
+	}
+}
+
+// TestContextRefUnknownGoalErrors: goal:<id> / plan:<id> context refs
+// resolve through the store; unknown ids error instead of being
+// silently ignored (P2b-M2).
+func TestContextRefUnknownGoalErrors(t *testing.T) {
+	f := newFixture(t, nil, fxOpts{})
+	f.m.opts.GoalPlan = goalplan.New(f.cfgDir)
+	_, err := f.m.resolveContextRefs([]string{"goal:g-00000000"})
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("unknown goal ref = %v, want a not-found error", err)
+	}
+	_, err = f.m.resolveContextRefs([]string{"plan:p-00000000"})
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("unknown plan ref = %v, want a not-found error", err)
+	}
+}
+
+// TestContextRefKnownGoalResolves: a real goal ref injects the
+// rendered document.
+func TestContextRefKnownGoalResolves(t *testing.T) {
+	f := newFixture(t, nil, fxOpts{})
+	gp := goalplan.New(f.cfgDir)
+	g, err := gp.Create(goalplan.KindGoal, "ctx", f.m.opts.SessionID, "the goal body", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.m.opts.GoalPlan = gp
+	block, err := f.m.resolveContextRefs([]string{"goal:" + g.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(block, g.ID) || !strings.Contains(block, "the goal body") {
+		t.Fatalf("block missing goal content:\n%s", block)
 	}
 }

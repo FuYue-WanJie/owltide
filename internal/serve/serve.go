@@ -129,10 +129,12 @@ func validID(id string) bool {
 // CLI wires it to narrow adapters so serve never imports subagent (no
 // key/endpoint reach).
 type State struct {
-	mu     sync.Mutex
-	subs   func() []map[string]any
-	jobs   func() []map[string]any
-	allows func() []string
+	mu       sync.Mutex
+	subs     func() []map[string]any
+	jobs     func() []map[string]any
+	allows   func() []string
+	GoalDocs func() []map[string]any
+	PlanDocs func() []map[string]any
 }
 
 // SetWiring installs the snapshot functions (called once at startup).
@@ -178,6 +180,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/subagents", s.handleSubs)
 	mux.HandleFunc("GET /api/jobs", s.handleJobs)
 	mux.HandleFunc("GET /api/perm/allows", s.handleAllows)
+	mux.HandleFunc("GET /api/goals", s.handleGoals)
+	mux.HandleFunc("GET /api/plans", s.handlePlans)
 	mux.HandleFunc("POST /api/permissions/{id}/answer", s.handlePermAnswer)
 	mux.HandleFunc("GET /api/events", s.handleEvents)
 	return mux
@@ -385,6 +389,28 @@ func (s *Server) pendingApprovals() []perm.Request {
 		return nil
 	}
 	return s.Perm.Pending()
+}
+
+func (s *Server) handleGoals(w http.ResponseWriter, _ *http.Request) {
+	s.State.mu.Lock()
+	fn := s.State.GoalDocs
+	s.State.mu.Unlock()
+	list := make([]map[string]any, 0)
+	if fn != nil {
+		list = fn()
+	}
+	writeJSON(w, list)
+}
+
+func (s *Server) handlePlans(w http.ResponseWriter, _ *http.Request) {
+	s.State.mu.Lock()
+	fn := s.State.PlanDocs
+	s.State.mu.Unlock()
+	list := make([]map[string]any, 0)
+	if fn != nil {
+		list = fn()
+	}
+	writeJSON(w, list)
 }
 
 func (s *Server) handleAllows(w http.ResponseWriter, _ *http.Request) {

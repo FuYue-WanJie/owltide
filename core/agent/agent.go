@@ -53,6 +53,9 @@ type Options struct {
 	// do not call it. The sub-agent manager uses it to stop running
 	// sub-agents and release their reservations.
 	OnRunEnd func(reason string)
+	// Compact triggers context compaction at turn boundaries (P2b-M6);
+	// nil disables.
+	Compact *CompactOptions
 	// GoalInject, when set, supplies the per-call goal/plan
 	// restatement (P2b-M2). It is appended to the message VIEW after
 	// the stable prefix — the prefix hash never changes.
@@ -450,6 +453,10 @@ func (a *Agent) Run(ctx context.Context, userText string) (string, error) {
 	if abortReason != "" && a.opts.OnRunEnd != nil {
 		a.opts.OnRunEnd(abortReason)
 	}
+
+	// P2b-M6: compaction only at the turn boundary, after the turn's
+	// answer is final — never mid-turn, never on a tool pair.
+	_ = a.maybeCompact()
 
 	a.logTurn(start, userText, toolRecs, len(toolRecs) == 0, runErr, budgetStop, turnPrompt, turnCompl)
 	return final, runErr

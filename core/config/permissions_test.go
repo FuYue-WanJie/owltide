@@ -18,3 +18,20 @@ func TestPermissionTimeout(t *testing.T) {
 		t.Fatalf("invalid timeout = %v, want 300s fallback", got)
 	}
 }
+
+// TestCompactRatio: budget.compact_at default 0.7, 0 disables, and it
+// never consults max_tokens (P2b-M6).
+func TestCompactRatio(t *testing.T) {
+	b := Default().Budget
+	if got := b.CompactRatio(); got != 0.7 {
+		t.Fatalf("default ratio = %v, want 0.7", got)
+	}
+	zero := 0.0
+	if got := (Budget{CompactAt: &zero}).CompactRatio(); got != 0 {
+		t.Fatalf("explicit 0 = %v, want disabled", got)
+	}
+	half := 0.5
+	if got := (Budget{CompactAt: &half, MaxTokens: 400000}).CompactRatio(); got != 0.5 {
+		t.Fatalf("explicit ratio = %v (max_tokens must not participate)", got)
+	}
+}

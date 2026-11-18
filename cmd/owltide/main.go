@@ -19,6 +19,7 @@ import (
 
 	"github.com/FuYue-WanJie/owltide/core/agent"
 	"github.com/FuYue-WanJie/owltide/core/agents"
+	"github.com/FuYue-WanJie/owltide/core/compaction"
 	"github.com/FuYue-WanJie/owltide/core/config"
 	"github.com/FuYue-WanJie/owltide/core/decision"
 	"github.com/FuYue-WanJie/owltide/core/evolve"
@@ -317,6 +318,11 @@ func setup(resumeID string, router, api bool) (agent.Options, func(), *subagent.
 		fmt.Printf("serve api: http://%s (token %s)\n", ln.Addr(), tok)
 	}
 
+	// P2b-M6/M7: context compaction store. Records are appended to
+	// ~/.owltide/compaction/<session>.jsonl; the sessionlog stays the
+	// single source of truth (only the in-memory view changes).
+	compMgr := compaction.New(platform.ConfigDir(home)+"/compaction", sessionID)
+
 	// P2b-M1/M2: goal/plan store handle (declared early — serve views
 	// and agent options reference it lazily).
 	var gpRef *goalplan.Manager
@@ -354,6 +360,13 @@ func setup(resumeID string, router, api bool) (agent.Options, func(), *subagent.
 			}
 			return views
 		}
+		apiSrv.State.Compactions = func() []compaction.Record {
+			recs, _, err := compMgr.Load()
+			if err != nil {
+				return nil
+			}
+			return recs
+		}
 		apiSrv.State.PlanDocs = func() []goalplan.PlanView {
 			views, err := gpRef.PlanViews()
 			if err != nil {
@@ -363,6 +376,19 @@ func setup(resumeID string, router, api bool) (agent.Options, func(), *subagent.
 		}
 	}
 
+	// (compMgr is declared before the api block.)
+	compactOpts := &agent.CompactOptions{
+		ContextTokens: resolvedContextTokens(cfg),
+		Ratio:         cfg.Budget.CompactRatio(),
+		Persist:       compMgr.Append,
+		OnFold: func(res compaction.Result) {
+			_ = decision.AppendEvent(platform.ConfigDir(home)+"/logs", "compaction",
+				map[string]any{
+					"level": res.Level, "span": res.Span, "kept": res.Kept,
+					"before": res.Before, "after": res.After,
+				})
+		},
+	}
 	// P2b-M2: goal/plan injection rides the [AUTO] view channel after
 	// the stable prefix — the prefix hash stays byte-identical. gp is
 	// declared later; resolve it lazily per call.
@@ -391,6 +417,15 @@ func setup(resumeID string, router, api bool) (agent.Options, func(), *subagent.
 	if err := reg.Register(tool.JobKill{M: shell.Jobs}); err != nil {
 		return agent.Options{}, nil, nil, nil, err
 	}
+	// P2b-M6: the reversible, read-only context tools (router-safe).
+	sessionLogPath := filepath.Join(platform.ConfigDir(home), "sessions", sessionID, "messages.jsonl")
+	if err := reg.Register(agent.ContextTools{LogPath: sessionLogPath}); err != nil {
+		return agent.Options{}, nil, nil, nil, err
+	}
+	if err := reg.Register(agent.ContextSearch{LogPath: sessionLogPath}); err != nil {
+		return agent.Options{}, nil, nil, nil, err
+	}
+
 	// ask_user: interactive runs pause for the answer; one-shot runs
 	// (no terminal question) get the make-assumptions guidance. Only
 	// the main agent's registry carries it.
@@ -590,6 +625,7 @@ func setup(resumeID string, router, api bool) (agent.Options, func(), *subagent.
 
 	return agent.Options{
 		GoalInject: injector,
+		Compact:    compactOpts,
 		Config:     cfg,
 		Client:     model.NewClient(cfg.Model.BaseURL, key, nil),
 		Tools:      reg,
@@ -607,6 +643,9 @@ func setup(resumeID string, router, api bool) (agent.Options, func(), *subagent.
 			// P2b-M1: coordination tools (documented exception — these
 			// are not router violations).
 			"goal_create", "goal_update", "plan_create", "plan_update",
+			// P2b-M6: read-only, reversible context tools are safe in
+			// router mode (they only read the session log).
+			"context_expand", "context_search",
 		},
 		OnRouterViolation: func(toolName string) {
 			subagent.AppendEvent(platform.ConfigDir(home)+"/logs", "router_violation",
@@ -754,6 +793,15 @@ func isLoopbackAddr(addr string) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback() || host == "localhost"
+}
+
+// resolvedContextTokens returns the resolved model context window (the
+// ONLY denominator for compaction; budget.max_tokens never applies).
+func resolvedContextTokens(cfg config.Config) int {
+	if r := cfg.Model.Resolved; r != nil && r.Limits.ContextTokens > 0 {
+		return r.Limits.ContextTokens
+	}
+	return config.Defaults.ContextTokens
 }
 
 // newAPIToken generates the local approval-API token (printed once to

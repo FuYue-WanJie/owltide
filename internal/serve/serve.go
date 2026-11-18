@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/FuYue-WanJie/owltide/core/compaction"
 	"github.com/FuYue-WanJie/owltide/core/goalplan"
 	"github.com/FuYue-WanJie/owltide/internal/perm"
 )
@@ -136,6 +137,8 @@ type State struct {
 	allows   func() []string
 	GoalDocs func() []goalplan.GoalView
 	PlanDocs func() []goalplan.PlanView
+	// Compactions lists the session's compaction records (P2b-M6/M7).
+	Compactions func() []compaction.Record
 }
 
 // SetWiring installs the snapshot functions (called once at startup).
@@ -182,6 +185,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/jobs", s.handleJobs)
 	mux.HandleFunc("GET /api/perm/allows", s.handleAllows)
 	mux.HandleFunc("GET /api/goals", s.handleGoals)
+	mux.HandleFunc("GET /api/compactions", s.handleCompactions)
 	mux.HandleFunc("GET /api/plans", s.handlePlans)
 	mux.HandleFunc("POST /api/permissions/{id}/answer", s.handlePermAnswer)
 	mux.HandleFunc("GET /api/events", s.handleEvents)
@@ -408,6 +412,17 @@ func (s *Server) handlePlans(w http.ResponseWriter, _ *http.Request) {
 	fn := s.State.PlanDocs
 	s.State.mu.Unlock()
 	list := make([]goalplan.PlanView, 0)
+	if fn != nil {
+		list = fn()
+	}
+	writeJSON(w, list)
+}
+
+func (s *Server) handleCompactions(w http.ResponseWriter, _ *http.Request) {
+	s.State.mu.Lock()
+	fn := s.State.Compactions
+	s.State.mu.Unlock()
+	list := make([]compaction.Record, 0)
 	if fn != nil {
 		list = fn()
 	}

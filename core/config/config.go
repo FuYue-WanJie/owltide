@@ -35,6 +35,18 @@ type Budget struct {
 	MaxTokens int `yaml:"max_tokens"`
 	// ToolTimeoutSec caps one run_shell call (0 = 60s default).
 	ToolTimeoutSec int `yaml:"tool_timeout_sec"`
+	// CompactAt is the compaction threshold ratio of the resolved
+	// context window (0 disables; unset -> 0.7; never uses
+	// max_tokens). P2b-M6.
+	CompactAt *float64 `yaml:"compact_at,omitempty"`
+}
+
+// CompactRatio resolves budget.compact_at: nil -> 0.7, 0 -> disabled.
+func (b Budget) CompactRatio() float64 {
+	if b.CompactAt == nil {
+		return 0.7
+	}
+	return *b.CompactAt
 }
 
 // Permissions configures the permission service (P2b-M13).

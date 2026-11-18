@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/FuYue-WanJie/owltide/core/compaction"
 	"github.com/FuYue-WanJie/owltide/internal/perm"
 )
 
@@ -238,5 +239,30 @@ func TestPendingSnapshotOnConnect(t *testing.T) {
 	joined := strings.Join(frames, "")
 	if !strings.Contains(joined, `"event":"approval_pending"`) || !strings.Contains(joined, r.ID) {
 		t.Fatalf("new client must see the pending approval:\n%s", joined)
+	}
+}
+
+// TestCompactionsEndpoint: the session's compaction records (M6/M7).
+func TestCompactionsEndpoint(t *testing.T) {
+	ts, sv := newTestServer(t)
+	resp, _ := http.Get(ts.URL + "/api/compactions")
+	var list []map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	resp.Body.Close()
+	if list == nil || len(list) != 0 {
+		t.Fatalf("empty compactions = %v", list)
+	}
+	sv.State.Compactions = func() []compaction.Record {
+		return []compaction.Record{{Level: "turn", Span: []int{0, 5}, Kept: 4, Before: 900, After: 200}}
+	}
+	resp, _ = http.Get(ts.URL + "/api/compactions")
+	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if len(list) != 1 || list[0]["level"] != "turn" {
+		t.Fatalf("compactions = %v", list)
 	}
 }

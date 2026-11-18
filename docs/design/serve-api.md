@@ -15,6 +15,7 @@
 | GET | `/api/perm/allows` | 本会话允许列表（按命令签名） | `{allows: [signature...]}` |
 | GET | `/api/goals` | goal 文档列表（M2） | `[{id, status, file, session}]` |
 | GET | `/api/plans` | plan 文档列表（M2） | `[{id, status, file, goal, session}]` |
+| GET | `/api/compactions` | 本会话压缩记录（M6/M7） | `[{ts, level, span, kept, before, after}]` |
 | GET | `/api/events` | SSE 事件流（`id: <seq>` + `data: {"seq":...,"event":...,"data":...}`；15s 心跳 `: ping`；支持 `Last-Event-ID` 补发） | text/event-stream |
 
 ## 约定与边界

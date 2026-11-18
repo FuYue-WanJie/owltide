@@ -45,6 +45,7 @@ Usage:
                           --api starts the local approval API (loopback, token)
   owltide run [--resume <session-id>] [--router] [--api] "task"
                           run one task and exit (optionally resumed; --api as above)
+  owltide goals [--json]  list goal documents (id, status, plans, title) + store report
   owltide model info      show resolved model limits and where each came from
   owltide serve [--addr 127.0.0.1:7877]
                           read-only HTTP API over runtime state (sessions,
@@ -67,6 +68,8 @@ func main() {
 		fmt.Println("wrote", config.Path())
 	case "sessions":
 		listSessions()
+	case "goals":
+		runGoalsCmd(os.Args[2:])
 	case "model":
 		runModelInfo(os.Args[2:])
 	case "serve":
@@ -343,32 +346,20 @@ func setup(resumeID string, router, api bool) (agent.Options, func(), *subagent.
 		apiSrv.Perm = permSvc
 		// Read-only goal/plan views (P2b-M2): id/status/refs only —
 		// bodies stay on disk, fetched on demand by the future UI.
-		apiSrv.State.GoalDocs = func() []map[string]any {
-			docs, err := gpRef.List(goalplan.KindGoal)
+		// P2b-M3: same read path as `owltide goals` (views.go).
+		apiSrv.State.GoalDocs = func() []goalplan.GoalView {
+			views, err := gpRef.GoalViews()
 			if err != nil {
 				return nil
 			}
-			out := make([]map[string]any, 0, len(docs))
-			for _, d := range docs {
-				out = append(out, map[string]any{
-					"id": d.ID, "status": d.Status, "file": d.FileName, "session": d.Session,
-				})
-			}
-			return out
+			return views
 		}
-		apiSrv.State.PlanDocs = func() []map[string]any {
-			docs, err := gpRef.List(goalplan.KindPlan)
+		apiSrv.State.PlanDocs = func() []goalplan.PlanView {
+			views, err := gpRef.PlanViews()
 			if err != nil {
 				return nil
 			}
-			out := make([]map[string]any, 0, len(docs))
-			for _, d := range docs {
-				out = append(out, map[string]any{
-					"id": d.ID, "status": d.Status, "file": d.FileName,
-					"goal": d.Goal, "session": d.Session,
-				})
-			}
-			return out
+			return views
 		}
 	}
 

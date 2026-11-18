@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/FuYue-WanJie/owltide/core/goalplan"
 	"github.com/FuYue-WanJie/owltide/internal/perm"
 )
 
@@ -133,8 +134,8 @@ type State struct {
 	subs     func() []map[string]any
 	jobs     func() []map[string]any
 	allows   func() []string
-	GoalDocs func() []map[string]any
-	PlanDocs func() []map[string]any
+	GoalDocs func() []goalplan.GoalView
+	PlanDocs func() []goalplan.PlanView
 }
 
 // SetWiring installs the snapshot functions (called once at startup).
@@ -395,7 +396,7 @@ func (s *Server) handleGoals(w http.ResponseWriter, _ *http.Request) {
 	s.State.mu.Lock()
 	fn := s.State.GoalDocs
 	s.State.mu.Unlock()
-	list := make([]map[string]any, 0)
+	list := make([]goalplan.GoalView, 0)
 	if fn != nil {
 		list = fn()
 	}
@@ -406,7 +407,7 @@ func (s *Server) handlePlans(w http.ResponseWriter, _ *http.Request) {
 	s.State.mu.Lock()
 	fn := s.State.PlanDocs
 	s.State.mu.Unlock()
-	list := make([]map[string]any, 0)
+	list := make([]goalplan.PlanView, 0)
 	if fn != nil {
 		list = fn()
 	}

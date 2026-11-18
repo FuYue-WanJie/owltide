@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/FuYue-WanJie/owltide/core/goalplan"
 )
 
 func newTestServer(t *testing.T) (*httptest.Server, *Server) {
@@ -246,5 +248,43 @@ func TestPermAllowsEndpoint(t *testing.T) {
 	resp.Body.Close()
 	if len(got.Allows) != 1 || got.Allows[0] != "cp\x00a\x00b" {
 		t.Fatalf("allows = %v", got.Allows)
+	}
+}
+
+// TestGoalPlanEndpoints: read-only goal/plan views (P2b-M2/M3).
+func TestGoalPlanEndpoints(t *testing.T) {
+	ts, sv := newTestServer(t)
+	for _, ep := range []string{"/api/goals", "/api/plans"} {
+		resp, _ := http.Get(ts.URL + ep)
+		var list []map[string]any
+		if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+			t.Fatalf("%s: %v", ep, err)
+		}
+		resp.Body.Close()
+		if list == nil || len(list) != 0 {
+			t.Fatalf("%s: want empty array, got %v", ep, list)
+		}
+	}
+	sv.State.GoalDocs = func() []goalplan.GoalView {
+		return []goalplan.GoalView{{ID: "g-0123abcd", Status: "active", File: "20261113-ship.md", Title: "ship"}}
+	}
+	sv.State.PlanDocs = func() []goalplan.PlanView {
+		return []goalplan.PlanView{{ID: "p-0123abcd", Status: "active", Goal: "g-0123abcd"}}
+	}
+	resp, _ := http.Get(ts.URL + "/api/plans")
+	var plans []map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&plans); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if len(plans) != 1 || plans[0]["goal"] != "g-0123abcd" {
+		t.Fatalf("plans = %v", plans)
+	}
+	resp, _ = http.Get(ts.URL + "/api/goals")
+	var goals []map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&goals)
+	resp.Body.Close()
+	if len(goals) != 1 || goals[0]["title"] != "ship" {
+		t.Fatalf("goals = %v", goals)
 	}
 }
